@@ -7,6 +7,7 @@ import { useSidebarStore } from "@/stores/useSidebarStore";
 import { SidebarItem } from "./SidebarItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
+import { SettingsModal } from "@/components/settings/SettingsModal";
 
 const MOCK_HISTORY = [
   { id: "1", title: "Site Suitability Analysis", date: "Today" },
@@ -16,6 +17,7 @@ const MOCK_HISTORY = [
 
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Prevent hydration mismatch on initial render with persistent state
   const [mounted, setMounted] = useState(false);
@@ -50,7 +52,7 @@ export const Sidebar = () => {
           label="New Chat"
           className="mt-3"
         />
-        <SidebarItem icon={Settings} label="Settings" />
+        <SidebarItem icon={Settings} label="Settings" onClick={() => setSettingsOpen(true)} />
         <SidebarItem icon={HelpCircle} label="Help & Feedback" />
 
         <AnimatePresence initial={false}>
@@ -154,6 +156,9 @@ export const Sidebar = () => {
       >
         {sidebarContent}
       </motion.aside>
+
+      {/* Settings Modal */}
+      <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </>
   );
 };
