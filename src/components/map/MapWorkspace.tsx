@@ -5,19 +5,18 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { Menu } from "lucide-react";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 
+import { OpenLayersMap } from "./OpenLayersMap";
+
 export const MapWorkspace = () => {
   const { setMobileOpen } = useSidebarStore();
 
   return (
     <main className="relative flex-1 h-full w-full bg-[#f8f9fa] dark:bg-[#0a0a0a] overflow-hidden">
       {/* 
-        Map Placeholder Layer 
-        In the future, OpenLayers/Deck.gl instances will mount here.
+        Interactive OpenLayers Map
       */}
       <div className="absolute inset-0 z-0">
-        <div className="w-full h-full border-[2px] border-dashed border-border/40 flex items-center justify-center text-muted-foreground/50">
-          Interactive Map Area
-        </div>
+        <OpenLayersMap />
       </div>
 
       {/* Top Bar Overlay */}
