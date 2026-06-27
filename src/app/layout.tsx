@@ -18,6 +18,8 @@ export const metadata: Metadata = {
   description: "AI-powered Geospatial Dashboard",
 };
 
+import { Toaster } from "@/components/ui/sonner";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -30,6 +32,7 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
         <TooltipProvider>{children}</TooltipProvider>
+        <Toaster position="top-right" theme="light" />
       </body>
     </html>
   );

@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
-import { ArrowUp, Paperclip, Loader2 } from "lucide-react";
+import { ArrowUp, Paperclip } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/useChatStore";
+import { Spinner } from "@/components/ui/spinner";
 
 export const ChatInput = () => {
   const [value, setValue] = useState("");
@@ -77,7 +78,7 @@ export const ChatInput = () => {
           className="p-2 m-2 mb-2 rounded-full bg-primary text-primary-foreground disabled:bg-muted disabled:text-muted-foreground transition-colors hover:bg-primary/90 flex items-center justify-center"
         >
           {isLoading ? (
-            <Loader2 className="w-5 h-5 animate-spin" />
+            <Spinner className="w-5 h-5" />
           ) : (
             <ArrowUp className="w-5 h-5" />
           )}

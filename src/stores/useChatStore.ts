@@ -7,8 +7,9 @@
  */
 
 import { create } from "zustand";
-import { getMCPAdapter } from "@/services/mcp/MCPClientService";
+import { useModelSettingsStore } from "./useModelSettingsStore";
 import { ChatMessage } from "@/types/mcp.types";
+import { toast } from "sonner";
 
 interface ChatState {
   messages: ChatMessage[];
@@ -56,23 +57,49 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }));
 
     try {
-      const adapter = getMCPAdapter();
+      const { selectedModelId, getSelectedModel, getApiKeyForModel } = useModelSettingsStore.getState();
+      const model = getSelectedModel();
+      if (!model) throw new Error("No model selected");
+      
+      const apiKey = getApiKeyForModel(model);
+      if (model.requiresApiKey && !apiKey) {
+        const errorMsg = `API key missing for ${model.name}. Please add it in Settings.`;
+        toast.warning(errorMsg);
+        throw new Error(errorMsg);
+      }
+
       const conversationHistory = get()
         .messages.filter((m) => !m.isLoading)
         .map((m) => ({ role: m.role, content: m.content }));
+      
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...conversationHistory, { role: "user", content: text.trim() }],
+          modelId: model.id,
+          provider: model.provider,
+          apiKey,
+        }),
+      });
 
-      const response = await adapter.chat(
-        [...conversationHistory, { role: "user", content: text.trim() }],
-        "You are MapsenseAI, a helpful geospatial assistant. Help users analyze maps and geographic data."
-      );
+      if (!response.ok) {
+        const errorData = await response.json();
+        const apiError = errorData.error || "Failed to get response from AI";
+        toast.error(`Error: ${apiError}`);
+        throw new Error(apiError);
+      }
+
+      const data = await response.json();
+      toast.success("Received response");
 
       // Replace loading message with actual response
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: response.content,
+        content: data.content,
         timestamp: Date.now(),
-        toolCalls: response.toolCalls,
+        toolCalls: data.toolCalls,
         isLoading: false,
       };
 
@@ -84,6 +111,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to get response";
+      
+      // If it wasn't already caught by the API key check or response.ok check, show generic error toast
+      if (!message.includes("API key missing") && !message.startsWith("Error:")) {
+         toast.error(message);
+      }
 
       // Replace loading with error message
       const errorMessage: ChatMessage = {

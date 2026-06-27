@@ -38,7 +38,7 @@ interface JsonRpcResponse {
  * Note: Har call pe naya process banata hai — simple aur stateless.
  * Production mein ise singleton/pool se replace kar sakte hain.
  */
-async function callMCPProcess(
+export async function callMCPProcess(
   method: string,
   params?: Record<string, unknown>,
   timeoutMs = 15000

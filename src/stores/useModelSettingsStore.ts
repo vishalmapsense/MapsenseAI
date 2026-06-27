@@ -30,15 +30,16 @@ export interface AIModel {
   requiresApiKey: boolean;
   apiKeyLabel: string;
   badge?: "Fast" | "Smart" | "Local" | "Powerful";
+  isDisabled?: boolean;
 }
 
 export const ALL_MODELS: AIModel[] = [
   // ── Free Models ──────────────────────────────────────────────
   {
-    id: "gemini-2.0-flash",
-    name: "Gemini 2.0 Flash",
+    id: "gemini-3.5-flash",
+    name: "Gemini 3.5 Flash",
     provider: "google",
-    description: "Google ka latest fast model. Free tier mein daily 1500 requests.",
+    description: "Google's latest and fastest model. Perfect for quick and reliable responses.",
     contextWindow: "1M tokens",
     isFree: true,
     requiresApiKey: true,
@@ -46,10 +47,10 @@ export const ALL_MODELS: AIModel[] = [
     badge: "Fast",
   },
   {
-    id: "gemini-1.5-flash",
-    name: "Gemini 1.5 Flash",
+    id: "gemini-2.5-flash",
+    name: "Gemini 2.5 Flash",
     provider: "google",
-    description: "Reliable Google model. Free tier available on AI Studio.",
+    description: "Highly capable Google model for everyday tasks with a large context window.",
     contextWindow: "1M tokens",
     isFree: true,
     requiresApiKey: true,
@@ -60,12 +61,13 @@ export const ALL_MODELS: AIModel[] = [
     id: "llama-3.3-70b-versatile",
     name: "Llama 3.3 70B (Groq)",
     provider: "groq",
-    description: "Meta ka open-source model, Groq pe extremely fast inference. Free tier.",
+    description: "Meta's open-source model, extremely fast inference on Groq. Free tier.",
     contextWindow: "128K tokens",
     isFree: true,
     requiresApiKey: true,
     apiKeyLabel: "Groq API Key",
     badge: "Fast",
+    isDisabled: true,
   },
   {
     id: "llama-3.1-8b-instant",
@@ -77,37 +79,41 @@ export const ALL_MODELS: AIModel[] = [
     requiresApiKey: true,
     apiKeyLabel: "Groq API Key",
     badge: "Fast",
+    isDisabled: true,
   },
   {
     id: "mixtral-8x7b-32768",
     name: "Mixtral 8x7B (Groq)",
     provider: "groq",
-    description: "Mistral ka Mixture-of-Experts model. Groq pe free.",
+    description: "Mistral's Mixture-of-Experts model. Free on Groq.",
     contextWindow: "32K tokens",
     isFree: true,
     requiresApiKey: true,
     apiKeyLabel: "Groq API Key",
+    isDisabled: true,
   },
   {
     id: "mistral-small-latest",
     name: "Mistral Small",
     provider: "mistral",
-    description: "Mistral AI ka efficient model. Free tier available.",
+    description: "Mistral AI's efficient model. Free tier available.",
     contextWindow: "32K tokens",
     isFree: true,
     requiresApiKey: true,
     apiKeyLabel: "Mistral API Key",
+    isDisabled: true,
   },
   {
     id: "ollama/llama3",
     name: "Llama 3 (Ollama Local)",
     provider: "ollama",
-    description: "Bilkul free! Aapke apne computer pe chalta hai. Ollama install karna hoga.",
+    description: "Completely free! Runs locally on your own computer. Requires Ollama.",
     contextWindow: "8K tokens",
     isFree: true,
     requiresApiKey: false,
     apiKeyLabel: "",
     badge: "Local",
+    isDisabled: true,
   },
 
   // ── Paid Models ───────────────────────────────────────────────
@@ -115,45 +121,48 @@ export const ALL_MODELS: AIModel[] = [
     id: "gpt-4o",
     name: "GPT-4o",
     provider: "openai",
-    description: "OpenAI ka flagship multimodal model. Best reasoning capabilities.",
+    description: "OpenAI's flagship multimodal model. Best reasoning capabilities.",
     contextWindow: "128K tokens",
     isFree: false,
     requiresApiKey: true,
     apiKeyLabel: "OpenAI API Key",
     badge: "Powerful",
+    isDisabled: true,
   },
   {
     id: "gpt-4o-mini",
     name: "GPT-4o Mini",
     provider: "openai",
-    description: "GPT-4o ka fast, affordable version. Great value for money.",
+    description: "Fast, affordable version of GPT-4o. Great value for money.",
     contextWindow: "128K tokens",
     isFree: false,
     requiresApiKey: true,
     apiKeyLabel: "OpenAI API Key",
     badge: "Fast",
+    isDisabled: true,
   },
   {
     id: "claude-3-5-sonnet-20241022",
     name: "Claude 3.5 Sonnet",
     provider: "anthropic",
-    description: "Anthropic ka best model. Exceptional reasoning aur code generation.",
+    description: "Anthropic's best model. Exceptional reasoning and code generation.",
     contextWindow: "200K tokens",
     isFree: false,
     requiresApiKey: true,
     apiKeyLabel: "Anthropic API Key",
     badge: "Smart",
+    isDisabled: true,
   },
   {
-    id: "gemini-1.5-pro",
-    name: "Gemini 1.5 Pro",
+    id: "gemini-3.1-flash-lite",
+    name: "Gemini 3.1 Flash Lite",
     provider: "google",
-    description: "Google ka most capable model with 1M context window.",
+    description: "Lightweight model designed for simple and fast tasks.",
     contextWindow: "1M tokens",
     isFree: false,
     requiresApiKey: true,
     apiKeyLabel: "Google AI Studio API Key",
-    badge: "Powerful",
+    badge: "Fast",
   },
 ];
 
@@ -186,7 +195,7 @@ interface ModelSettingsState {
 export const useModelSettingsStore = create<ModelSettingsState>()(
   persist(
     (set, get) => ({
-      selectedModelId: "gemini-2.0-flash", // Default: free model
+      selectedModelId: "gemini-3.5-flash", // Default: free model
       apiKeys: {},
       ollamaBaseUrl: "http://localhost:11434",
 

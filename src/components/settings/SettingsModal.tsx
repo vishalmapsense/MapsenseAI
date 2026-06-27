@@ -179,17 +179,22 @@ function ModelCard({
   isSelected: boolean;
   onSelect: () => void;
 }) {
+  const isDisabled = model.isDisabled;
+
   return (
-    <motion.button
-      onClick={onSelect}
-      whileHover={{ scale: 1.01 }}
-      whileTap={{ scale: 0.99 }}
+    <motion.div
+      whileHover={!isDisabled ? { scale: 1.01 } : undefined}
+      whileTap={!isDisabled ? { scale: 0.99 } : undefined}
       transition={{ duration: 0.15 }}
+      onClick={!isDisabled ? onSelect : undefined}
       className={`
-        w-full text-left rounded-xl p-2.5 border transition-all duration-200 cursor-pointer
+        w-full text-left rounded-xl p-2.5 border transition-all duration-200 
+        ${isDisabled ? "opacity-50 cursor-not-allowed grayscale-[50%]" : "cursor-pointer"}
         ${
           isSelected
             ? "border-blue-500/60 bg-blue-50 dark:bg-blue-500/8 shadow-sm shadow-blue-500/10"
+            : isDisabled
+            ? "border-zinc-200 dark:border-zinc-800/60 bg-zinc-50 dark:bg-zinc-900/20"
             : "border-zinc-200 dark:border-zinc-800/60 bg-white dark:bg-zinc-900/40 hover:border-zinc-300 dark:hover:border-zinc-700/80 hover:bg-zinc-50 dark:hover:bg-zinc-900/60"
         }
       `}
@@ -204,14 +209,19 @@ function ModelCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{model.name}</span>
-            {model.badge && (
+            {model.badge && !isDisabled && (
               <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${BADGE_STYLES[model.badge]}`}>
                 {model.badge}
               </span>
             )}
-            {model.isFree && (
+            {model.isFree && !isDisabled && (
               <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-400 dark:border-emerald-500/20">
                 FREE
+              </span>
+            )}
+            {isDisabled && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-zinc-100 text-zinc-500 border border-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:border-zinc-700">
+                Coming Soon
               </span>
             )}
           </div>
@@ -237,7 +247,7 @@ function ModelCard({
           {isSelected && <div className="w-1.5 h-1.5 rounded-full bg-white" />}
         </div>
       </div>
-    </motion.button>
+    </motion.div>
   );
 }
 
