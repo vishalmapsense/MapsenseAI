@@ -8,15 +8,10 @@ import { SidebarItem } from "./SidebarItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { SettingsModal } from "@/components/settings/SettingsModal";
-
-const MOCK_HISTORY = [
-  { id: "1", title: "Site Suitability Analysis", date: "Today" },
-  { id: "2", title: "New York Zoning Buffers", date: "Yesterday" },
-  { id: "3", title: "Population Density 2024", date: "Previous 7 Days" },
-];
-
+import { useChatStore } from "@/stores/useChatStore";
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
+  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession } = useChatStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Prevent hydration mismatch on initial render with persistent state
@@ -51,6 +46,10 @@ export const Sidebar = () => {
           icon={MessageSquarePlus}
           label="New Chat"
           className="mt-3"
+          onClick={() => {
+            createNewSession();
+            setMobileOpen(false);
+          }}
         />
         <SidebarItem icon={Settings} label="Settings" onClick={() => setSettingsOpen(true)} />
         <SidebarItem icon={HelpCircle} label="Help & Feedback" />
@@ -74,12 +73,16 @@ export const Sidebar = () => {
                       <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1 font-semibold px-2">
                         Recent Conversations
                       </div>
-                      {MOCK_HISTORY.map((item) => (
+                      {sessions.length === 0 && (
+                        <div className="text-[10px] text-muted-foreground/70 px-2 italic">No chats yet</div>
+                      )}
+                      {sessions.map((item) => (
                         <div
                           key={item.id}
+                          onClick={() => setActiveSession(item.id)}
                           className={cn(
-                            "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-default truncate transition-colors",
-                            item.id === "1" && "bg-sidebar-accent/50 text-foreground font-medium"
+                            "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors",
+                            item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
                           )}
                         >
                           {item.title}
@@ -111,12 +114,19 @@ export const Sidebar = () => {
               </div>
 
               <div className="flex items-start flex-col gap-0.5 pb-4 w-full">
-                {MOCK_HISTORY.map((item) => (
+                {sessions.length === 0 && (
+                  <div className="text-xs text-muted-foreground/70 px-4 py-2 italic">No chats yet</div>
+                )}
+                {sessions.map((item) => (
                   <SidebarItem
                     key={item.id}
                     icon={MessageSquare}
                     label={item.title}
-                    isActive={item.id === "1"}
+                    isActive={item.id === activeSessionId}
+                    onClick={() => {
+                      setActiveSession(item.id);
+                      setMobileOpen(false); // Close sidebar on mobile
+                    }}
                   />
                 ))}
               </div>

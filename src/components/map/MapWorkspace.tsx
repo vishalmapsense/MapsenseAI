@@ -2,6 +2,7 @@
 
 import React from "react";
 import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatOverlay } from "@/components/chat/ChatOverlay";
 import { Menu } from "lucide-react";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 
@@ -34,6 +35,9 @@ export const MapWorkspace = () => {
           MapsenseAI
         </div>
       </div>
+
+      {/* Floating Chat Panel */}
+      <ChatOverlay />
 
       {/* Chat Input Overlay */}
       <ChatInput />
