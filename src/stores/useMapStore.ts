@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+export type BaseMapType = "osm" | "carto-light" | "carto-dark" | "satellite";
+
 export interface MapCommand {
   type: string;
   payload?: any;
@@ -7,13 +9,16 @@ export interface MapCommand {
 
 interface MapState {
   mapFeatures: any[]; // Array of GeoJSON Feature or FeatureCollection
+  baseMap: BaseMapType;
   
   executeCommands: (commands: MapCommand[]) => void;
   clearFeatures: () => void;
+  setBaseMap: (baseMap: BaseMapType) => void;
 }
 
 export const useMapStore = create<MapState>((set) => ({
   mapFeatures: [],
+  baseMap: "osm",
   
   executeCommands: (commands: MapCommand[]) => set((state) => {
     if (!commands || !Array.isArray(commands)) return state;
@@ -33,5 +38,6 @@ export const useMapStore = create<MapState>((set) => ({
     return { mapFeatures: newFeatures };
   }),
   
-  clearFeatures: () => set({ mapFeatures: [] })
+  clearFeatures: () => set({ mapFeatures: [] }),
+  setBaseMap: (baseMap) => set({ baseMap })
 }));

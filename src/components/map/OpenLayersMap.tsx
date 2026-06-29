@@ -5,19 +5,51 @@ import Map from "ol/Map";
 import View from "ol/View";
 import TileLayer from "ol/layer/Tile";
 import OSM from "ol/source/OSM";
+import XYZ from "ol/source/XYZ";
 import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import GeoJSON from "ol/format/GeoJSON";
 import { Style, Stroke, Fill, Circle as CircleStyle } from "ol/style";
 import { useMapStore } from "@/stores/useMapStore";
 
+const getBaseMapSource = (baseMap: string) => {
+  switch (baseMap) {
+    case "carto-light":
+      return new XYZ({
+        url: 'https://{a-c}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png',
+        attributions: '© OpenStreetMap contributors © CARTO',
+      });
+    case "carto-dark":
+      return new XYZ({
+        url: 'https://{a-c}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+        attributions: '© OpenStreetMap contributors © CARTO',
+      });
+    case "satellite":
+      return new XYZ({
+        url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        attributions: 'Tiles © Esri',
+      });
+    case "osm":
+    default:
+      return new OSM();
+  }
+};
+
 export const OpenLayersMap = () => {
   const mapRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<Map | null>(null);
   const vectorSourceRef = useRef<VectorSource>(new VectorSource());
+  const tileLayerRef = useRef<TileLayer<OSM | XYZ>>(new TileLayer({ source: new OSM() }));
   const [hoverInfo, setHoverInfo] = useState<{ props: Record<string, any>; x: number; y: number } | null>(null);
 
   const mapFeatures = useMapStore((state) => state.mapFeatures);
+  const baseMap = useMapStore((state) => state.baseMap);
+
+  useEffect(() => {
+    if (tileLayerRef.current) {
+      tileLayerRef.current.setSource(getBaseMapSource(baseMap));
+    }
+  }, [baseMap]);
 
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
@@ -46,9 +78,7 @@ export const OpenLayersMap = () => {
     const map = new Map({
       target: mapRef.current,
       layers: [
-        new TileLayer({
-          source: new OSM(),
-        }),
+        tileLayerRef.current,
         vectorLayer,
       ],
       view: new View({
