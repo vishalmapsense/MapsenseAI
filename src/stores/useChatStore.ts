@@ -11,6 +11,7 @@ import { useModelSettingsStore } from "./useModelSettingsStore";
 import { ChatMessage } from "@/types/mcp.types";
 import { toast } from "sonner";
 import { useMapStore } from "./useMapStore";
+import { executeClientCommands } from "@/lib/mapExecutor";
 
 export interface ChatSession {
   id: string;
@@ -144,6 +145,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           provider: model.provider,
           apiKey,
           userLocation: get().userLocation,
+          mapViewState: useMapStore.getState().mapViewState,
+          baseMap: useMapStore.getState().baseMap,
         }),
       });
 
@@ -222,10 +225,30 @@ export const useChatStore = create<ChatState>((set, get) => {
         useMapStore.getState().executeCommands(finalData.content.commands);
       }
 
+      let executionText = "";
+      // Execute client tool commands directly (zoom, rotate, etc.) and collect validation results
+      if (finalData.clientToolCommands && Array.isArray(finalData.clientToolCommands) && finalData.clientToolCommands.length > 0) {
+        const map = useMapStore.getState().mapInstance;
+        if (map) {
+          const results = await executeClientCommands(map, finalData.clientToolCommands);
+          const messages = results.map(r => r.success ? `✅ ${r.message}` : `❌ ${r.message}`);
+          if (messages.length > 0) {
+            executionText = `\n\n**Map Actions Executed:**\n${messages.join("\n")}`;
+          }
+        } else {
+          executionText = `\n\n❌ Failed to execute map actions: Map instance not ready.`;
+        }
+      }
+
+      let content = finalData.content?.text || "";
+      if (executionText) {
+        content = content.trim() ? `${content}${executionText}` : executionText.trim();
+      }
+
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: finalData.content?.text || "*(No response text)*",
+        content: content || "*(No response text)*",
         timestamp: Date.now(),
         toolCalls: finalData.toolCalls,
         usage: finalData.usage,

@@ -10,6 +10,7 @@ import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import GeoJSON from "ol/format/GeoJSON";
 import { Style, Stroke, Fill, Circle as CircleStyle } from "ol/style";
+import { toLonLat, fromLonLat } from "ol/proj";
 import { useMapStore } from "@/stores/useMapStore";
 
 const getBaseMapSource = (baseMap: string) => {
@@ -42,8 +43,7 @@ export const OpenLayersMap = () => {
   const tileLayerRef = useRef<TileLayer<OSM | XYZ>>(new TileLayer({ source: new OSM() }));
   const [hoverInfo, setHoverInfo] = useState<{ props: Record<string, any>; x: number; y: number } | null>(null);
 
-  const mapFeatures = useMapStore((state) => state.mapFeatures);
-  const baseMap = useMapStore((state) => state.baseMap);
+  const { mapFeatures, baseMap, setMapViewState, setBaseMap, setMapInstance } = useMapStore();
 
   useEffect(() => {
     if (tileLayerRef.current) {
@@ -100,9 +100,9 @@ export const OpenLayersMap = () => {
       let hit = false;
       map.forEachFeatureAtPixel(pixel, (feature) => {
         const props = feature.getProperties() || {};
-        
+
         // Don't show tooltip if properties only contain geometry
-        if (Object.keys(props).length > 1) { 
+        if (Object.keys(props).length > 1) {
           const mouseEvent = e.originalEvent as MouseEvent;
           setHoverInfo({
             props: props,
@@ -113,16 +113,33 @@ export const OpenLayersMap = () => {
         }
         return true; // stop at first feature
       });
-      
+
       if (!hit) {
         setHoverInfo(null);
       }
-      
+
       // change cursor
       map.getTargetElement().style.cursor = hit ? "pointer" : "";
     });
 
+    // Track map state for the LLM context
+    map.on("moveend", () => {
+      const view = map.getView();
+      const centerProj = view.getCenter();
+      if (centerProj) {
+        const center = toLonLat(centerProj) as [number, number];
+        setMapViewState({
+          center: [center[0], center[1]],
+          zoom: view.getZoom() || 0,
+          rotation: (view.getRotation() * 180) / Math.PI,
+        });
+      }
+    });
+
+    setMapInstance(map);
+
     return () => {
+      setMapInstance(null);
       map.setTarget(undefined);
       mapInstanceRef.current = null;
     };
@@ -135,11 +152,11 @@ export const OpenLayersMap = () => {
     const source = vectorSourceRef.current;
     source.clear(); // Clear old features on new chat actions? Or keep them? Let's keep them and just re-add all.
     // Actually, it's better to clear and draw all current mapFeatures
-    
+
     if (mapFeatures.length === 0) return;
-    
+
     const geojsonFormat = new GeoJSON();
-    
+
     mapFeatures.forEach((featureObj) => {
       try {
         const features = geojsonFormat.readFeatures(featureObj, {
@@ -167,7 +184,7 @@ export const OpenLayersMap = () => {
   return (
     <div className="relative w-full h-full">
       <div ref={mapRef} className="w-full h-full bg-[#f8f9fa] dark:bg-[#0a0a0a]" />
-      
+
       {/* Hover Tooltip */}
       {hoverInfo && (
         <div
@@ -181,8 +198,8 @@ export const OpenLayersMap = () => {
             const p = hoverInfo.props || {};
             const title = p.name || p.instruction || p.title || "Map Location";
             const subtitle = p.full_address || p.place_formatted || "";
-            const category = p.poi_category 
-              ? (Array.isArray(p.poi_category) ? p.poi_category.join(", ") : p.poi_category) 
+            const category = p.poi_category
+              ? (Array.isArray(p.poi_category) ? p.poi_category.join(", ") : p.poi_category)
               : p.feature_type;
             const distance = p.distance ? `${(p.distance / 1000).toFixed(2)} km` : null;
 
@@ -190,7 +207,7 @@ export const OpenLayersMap = () => {
               <div className="flex flex-col gap-1.5">
                 <div className="font-semibold text-[13px] leading-tight">{title}</div>
                 {subtitle && <div className="text-muted-foreground text-[10px] leading-tight">{subtitle}</div>}
-                
+
                 {(category || distance) && (
                   <div className="flex items-center flex-wrap gap-1.5 mt-1 pt-1.5 border-t border-border/50">
                     {category && <span className="text-[9px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded capitalize">{category}</span>}

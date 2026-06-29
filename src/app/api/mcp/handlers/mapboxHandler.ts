@@ -22,7 +22,17 @@ let mcpClient: Client | null = (globalThis as any)._mcpClient || null;
 
 async function getMcpClient(): Promise<Client> {
   if (mcpClient) {
-    return mcpClient;
+    // Health check: try a lightweight ping to see if the process is still alive
+    try {
+      await mcpClient.listTools();
+      return mcpClient;
+    } catch (err) {
+      console.warn("[MCP] Stale connection detected, reconnecting...");
+      mcpClient = null;
+      (globalThis as any)._mcpClient = null;
+      (globalThis as any)._mcpTools = null;
+      cachedTools = null;
+    }
   }
 
   const scriptPath = MAPBOX_MCP_CONFIG.serverScriptPath;
@@ -61,38 +71,104 @@ async function getMcpClient(): Promise<Client> {
   return mcpClient;
 }
 
+/**
+ * Force reconnect the MCP client (useful after errors).
+ */
+async function reconnectMcpClient(): Promise<Client> {
+  console.log("[MCP] Force reconnecting...");
+  try {
+    if (mcpClient) {
+      await mcpClient.close().catch(() => {});
+    }
+  } catch {}
+  mcpClient = null;
+  (globalThis as any)._mcpClient = null;
+  (globalThis as any)._mcpTools = null;
+  cachedTools = null;
+  return getMcpClient();
+}
+
 // ─── Core Execution wrapper ───────────────────────────────────
 
 let cachedTools: any = (globalThis as any)._mcpTools || null;
+
+const MAX_RETRIES = 2;
 
 export async function callMCPProcess(
   method: string,
   params?: any
 ): Promise<unknown> {
-  const client = await getMcpClient();
+  let lastError: Error | null = null;
 
-  if (method === "tools/list") {
-    if (cachedTools) return cachedTools;
-    const result = await client.listTools();
-    cachedTools = result;
-    (globalThis as any)._mcpTools = cachedTools;
-    return result;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const client = attempt === 0 ? await getMcpClient() : await reconnectMcpClient();
+
+      if (method === "tools/list") {
+        if (cachedTools && attempt === 0) return cachedTools;
+        const result = await client.listTools();
+        cachedTools = result;
+        (globalThis as any)._mcpTools = cachedTools;
+        return result;
+      }
+
+      if (method === "tools/call") {
+        const result = await client.callTool({
+          name: params.name,
+          arguments: params.arguments,
+        });
+
+        // Check if the MCP server itself reported an error
+        if (result && (result as any).isError) {
+          const errorContent = (result as any).content;
+          let errorMsg = "MCP tool returned an error";
+          if (Array.isArray(errorContent)) {
+            for (const block of errorContent) {
+              if (block.type === "text" && block.text) {
+                try {
+                  const parsed = JSON.parse(block.text);
+                  errorMsg = parsed.message || errorMsg;
+                } catch {
+                  errorMsg = block.text;
+                }
+              }
+            }
+          }
+
+          // If it's a "fetch failed" type error, retry with reconnect
+          if (errorMsg.includes("fetch failed") && attempt < MAX_RETRIES) {
+            console.warn(`[MCP] Tool returned fetch error, retry ${attempt + 1}/${MAX_RETRIES}...`);
+            lastError = new Error(errorMsg);
+            continue;
+          }
+
+          // Non-retryable MCP error — return it as-is for the LLM to handle
+          return result;
+        }
+
+        return result;
+      }
+
+      if (method === "resources/read") {
+        return await client.readResource({
+          uri: params.uri,
+        });
+      }
+
+      throw new Error(`Unsupported MCP method: ${method}`);
+    } catch (err: any) {
+      lastError = err;
+      console.error(`[MCP] Attempt ${attempt + 1} failed:`, err.message);
+
+      if (attempt < MAX_RETRIES) {
+        // Wait a bit before retrying
+        await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+        continue;
+      }
+    }
   }
 
-  if (method === "tools/call") {
-    return await client.callTool({
-      name: params.name,
-      arguments: params.arguments,
-    });
-  }
-  
-  if (method === "resources/read") {
-    return await client.readResource({
-      uri: params.uri,
-    });
-  }
-
-  throw new Error(`Unsupported MCP method: ${method}`);
+  throw lastError || new Error("MCP call failed after retries");
 }
 
 // ─── Public Handler for Next.js API Route ─────────────────────

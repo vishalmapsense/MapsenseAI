@@ -1,9 +1,11 @@
 import { NextRequest } from "next/server";
-import { GoogleGenerativeAI, SchemaType, Schema } from "@google/generative-ai";
+import { GoogleGenerativeAI, SchemaType, Schema, FunctionCallingMode } from "@google/generative-ai";
 import { callMCPProcess } from "../mcp/handlers/mapboxHandler";
 import { MCPTool, MCPToolCall } from "@/types/mcp.types";
 import { convertMCPToolsToGeminiTools } from "@/lib/mcpToGemini";
 import { INTENT_CLASSIFICATION_PROMPT, MAIN_ORCHESTRATOR_PROMPT } from "@/config/prompts";
+import { ALL_CLIENT_TOOLS, isClientTool, buildClientToolResponse } from "@/config/clientTools";
+import type { MapCommand } from "@/stores/useMapStore";
 
 // ─── Helper: GeoJSON extract karo tool result se ─────────────────────────────
 function extractGeoJSON(data: any): any | null {
@@ -57,6 +59,20 @@ function extractResourceUriFromText(text: string): string | null {
   return match ? match[1] : null;
 }
 
+// ─── Map: client tool name → MapCommand type ─────────────────────────────────
+const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
+  map_zoom_in: "ZOOM_IN",
+  map_zoom_out: "ZOOM_OUT",
+  map_set_zoom: "SET_ZOOM",
+  map_rotate: "ROTATE",
+  map_reset_rotation: "RESET_ROTATION",
+  map_fly_to: "FLY_TO",
+  map_fit_bounds: "FIT_BOUNDS",
+  map_set_base: "SET_BASE_MAP",
+  map_clear_layers: "CLEAR_MAP",
+  map_toggle_layer: "TOGGLE_LAYER",
+};
+
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -69,7 +85,7 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), { status: 400 });
   }
 
-  const { messages, modelId, provider, apiKey, userLocation } = bodyData;
+  const { messages, modelId, provider, apiKey, userLocation, mapViewState, baseMap } = bodyData;
 
   if (!messages || !modelId || !provider || !apiKey) {
     return new Response(
@@ -92,8 +108,22 @@ export async function POST(req: NextRequest) {
         }));
         
         let lastMessage = messages[messages.length - 1].content;
+        
+        // --- Inject System Context ---
+        let systemContext = "[System Context:";
         if (userLocation && userLocation.lat && userLocation.lng) {
-          lastMessage = `[System Context: The user's current GPS location is Latitude: ${userLocation.lat}, Longitude: ${userLocation.lng}.]\n\n${lastMessage}`;
+          systemContext += ` The user's current GPS location is Latitude: ${userLocation.lat}, Longitude: ${userLocation.lng}.`;
+        }
+        if (mapViewState) {
+          systemContext += ` The current map view is centered at [lng: ${mapViewState.center[0].toFixed(4)}, lat: ${mapViewState.center[1].toFixed(4)}] with zoom level ${mapViewState.zoom.toFixed(1)} and rotation ${mapViewState.rotation}°.`;
+        }
+        if (baseMap) {
+          systemContext += ` The current active base map style is '${baseMap}'.`;
+        }
+        systemContext += "]";
+        
+        if (systemContext.length > 17) {
+          lastMessage = `${systemContext}\n\n${lastMessage}`;
         }
 
         // ====================================================================
@@ -110,7 +140,7 @@ export async function POST(req: NextRequest) {
             },
             intent: {
               type: SchemaType.STRING,
-              description: "One of: conversation, greeting, help, knowledge, geocode, nearby_search, routing, buffer, isochrone, spatial_analysis, map_visualization, layer_management, unknown",
+              description: "One of: conversation, greeting, help, knowledge, geocode, nearby_search, routing, buffer, isochrone, spatial_analysis, map_visualization, layer_management, map_interaction, unknown",
             },
             reason: {
               type: SchemaType.STRING,
@@ -150,9 +180,11 @@ export async function POST(req: NextRequest) {
         
         let geminiTools: any[] = [];
         if (requiresTools) {
-          sendEvent({ type: "status", message: "Loading Mapbox capabilities..." });
+          sendEvent({ type: "status", message: "Loading capabilities..." });
           const toolsResult = await callMCPProcess("tools/list") as { tools: MCPTool[] };
-          geminiTools = convertMCPToolsToGeminiTools(toolsResult.tools);
+          const mcpGeminiTools = convertMCPToolsToGeminiTools(toolsResult.tools);
+          // Merge MCP tools + Client tools into a single declarations array
+          geminiTools = [...mcpGeminiTools, ...ALL_CLIENT_TOOLS];
         } else {
           sendEvent({ type: "status", message: "Generating conversational response..." });
         }
@@ -163,6 +195,18 @@ export async function POST(req: NextRequest) {
             text: {
               type: SchemaType.STRING,
               description: "Human-readable AI response in Markdown.",
+            },
+            map_actions: {
+              type: SchemaType.ARRAY,
+              description: "Array of map interactions (zoom, rotate, base map).",
+              items: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  tool: { type: SchemaType.STRING },
+                  args: { type: SchemaType.OBJECT }
+                },
+                required: ["tool", "args"]
+              }
             },
             commands: {
               type: SchemaType.ARRAY,
@@ -182,11 +226,16 @@ export async function POST(req: NextRequest) {
           required: ["text", "commands"]
         };
 
+        // When tools are available, use AUTO mode so the model decides when to call tools.
+        // When no tools, use structured JSON output.
         const mainModel = genAI.getGenerativeModel({
           model: modelId,
           tools: requiresTools && geminiTools.length > 0 ? [{ functionDeclarations: geminiTools }] : undefined,
-          generationConfig: requiresTools && geminiTools.length > 0 
-            ? {} // Do not use responseMimeType with function calling to prevent 400 Bad Request
+          toolConfig: requiresTools && geminiTools.length > 0
+            ? { functionCallingConfig: { mode: FunctionCallingMode.AUTO } }
+            : undefined,
+          generationConfig: requiresTools && geminiTools.length > 0
+            ? {} // No JSON schema when function calling is active (causes 400)
             : {
                 responseMimeType: "application/json",
                 responseSchema: responseSchema,
@@ -196,6 +245,7 @@ export async function POST(req: NextRequest) {
 
         const mainChat = mainModel.startChat({ history });
         const toolCallsMade: MCPToolCall[] = [];
+        const clientToolCommands: MapCommand[] = []; // Collect client tool actions
         
         let result = await mainChat.sendMessage([{ text: lastMessage }]);
         let functionCalls = result.response.functionCalls();
@@ -207,15 +257,34 @@ export async function POST(req: NextRequest) {
         }
 
         // ====================================================================
-        // STEP 3: Handle Tool Execution Loop
+        // STEP 3: Handle Tool Execution Loop (Hybrid: Client + MCP)
         // ====================================================================
         while (functionCalls && functionCalls.length > 0) {
           const functionResponses = [];
 
           for (const call of functionCalls) {
-            sendEvent({ type: "status", message: `Executing tool: ${call.name.replace(/_/g, ' ')}...` });
+            sendEvent({ type: "status", message: `Executing: ${call.name.replace(/^map_/, '').replace(/_/g, ' ')}...` });
             console.log(`[Gemini] Calling tool: ${call.name}`);
             
+            // ── Client Tool Path ──────────────────────────────────
+            if (isClientTool(call.name)) {
+              const commandType = CLIENT_TOOL_COMMAND_MAP[call.name];
+              if (commandType) {
+                clientToolCommands.push({ type: commandType, payload: call.args || {} });
+                console.log(`[Client Tool] ${call.name} → ${commandType}`, call.args);
+              }
+              
+              // Return a synthetic "success" response to the LLM
+              functionResponses.push({
+                functionResponse: {
+                  name: call.name,
+                  response: buildClientToolResponse(call.name, call.args as Record<string, unknown> || {}),
+                },
+              });
+              continue;
+            }
+
+            // ── MCP Tool Path ─────────────────────────────────────
             try {
               const rawToolResult = await callMCPProcess("tools/call", {
                 name: call.name,
@@ -275,12 +344,66 @@ export async function POST(req: NextRequest) {
         const rawContent = result.response.text();
         let finalJson;
         try {
-          const cleanedText = rawContent.replace(/^```(json)?\s*/i, '').replace(/```\s*$/i, '').trim();
-          finalJson = JSON.parse(cleanedText);
+          // Model sometimes outputs multiple JSON objects — extract the first one
+          const cleanedText = rawContent
+            .replace(/^```(json)?\s*/i, '')
+            .replace(/```\s*$/i, '')
+            .trim();
+          
+          const firstBrace = cleanedText.indexOf('{');
+          const lastBrace = cleanedText.lastIndexOf('}');
+          if (firstBrace !== -1 && lastBrace !== -1) {
+            try {
+              finalJson = JSON.parse(cleanedText.slice(firstBrace, lastBrace + 1));
+            } catch {
+              finalJson = JSON.parse(cleanedText);
+            }
+          } else {
+            finalJson = JSON.parse(cleanedText);
+          }
+          
+          if (!finalJson.text && !finalJson.commands) {
+            finalJson = { text: rawContent, commands: [] };
+          }
         } catch (e) {
-          finalJson = { text: rawContent, commands: [] };
+          const jsonMatch = rawContent.match(/\{[\s\S]*?"text"\s*:\s*"([^"]+)"/);
+          const extractedText = jsonMatch ? jsonMatch[1] : rawContent;
+          finalJson = { text: extractedText, commands: [] };
         }
 
+        // ── Fallback: extract embedded tool_calls from text ──
+        if (clientToolCommands.length === 0) {
+          // 1. Check if they exist in the already parsed JSON
+          const fallbackCalls = finalJson.tool_calls || finalJson.toolCalls || finalJson.map_actions;
+          if (Array.isArray(fallbackCalls)) {
+            for (const tc of fallbackCalls) {
+              const name = tc.name || tc.tool;
+              if (name && isClientTool(name) && CLIENT_TOOL_COMMAND_MAP[name]) {
+                clientToolCommands.push({ type: CLIENT_TOOL_COMMAND_MAP[name], payload: tc.arguments ?? tc.args ?? {} });
+                console.log(`[Fallback Parser JSON] Extracted client tool: ${name}`, tc.arguments ?? tc.args);
+              }
+            }
+          }
+
+          // 2. Regex fallback (if JSON parse partially failed)
+          if (clientToolCommands.length === 0) {
+            const toolCallMatch = rawContent.match(/\{[\s\S]*?"(?:tool_calls|map_actions|toolCalls)"\s*:\s*(\[[\s\S]*?\])/);
+            if (toolCallMatch) {
+              try {
+                const embeddedCalls = JSON.parse(toolCallMatch[1]);
+                for (const tc of embeddedCalls) {
+                  const name = tc.name || tc.tool;
+                  if (name && isClientTool(name) && CLIENT_TOOL_COMMAND_MAP[name]) {
+                    clientToolCommands.push({ type: CLIENT_TOOL_COMMAND_MAP[name], payload: tc.arguments ?? tc.args ?? {} });
+                    console.log(`[Fallback Parser Regex] Extracted client tool: ${name}`, tc.arguments ?? tc.args);
+                  }
+                }
+              } catch { /* ignore parse errors */ }
+            }
+          }
+        }
+
+        // ── Resolve GeoJSON from MCP tool results ──
         if (finalJson.commands && Array.isArray(finalJson.commands) && toolCallsMade.length > 0) {
           const collectedGeoJSON: unknown[] = [];
 
@@ -325,6 +448,7 @@ export async function POST(req: NextRequest) {
             content: finalJson,
             toolCalls: toolCallsMade,
             usage: totalUsage,
+            clientToolCommands, // Client tool commands for frontend execution
           },
         });
 
