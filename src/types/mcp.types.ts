@@ -10,6 +10,12 @@
 
 export type MessageRole = "user" | "assistant" | "system";
 
+export interface TokenUsage {
+  promptTokenCount: number;
+  candidatesTokenCount: number;
+  totalTokenCount: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -17,6 +23,7 @@ export interface ChatMessage {
   timestamp: number;
   toolCalls?: MCPToolCall[];
   isLoading?: boolean;
+  usage?: TokenUsage;
 }
 
 // ─── MCP Tool Types ────────────────────────────────────────────
@@ -31,6 +38,18 @@ export interface MCPToolCall {
   toolName: string;
   arguments: Record<string, unknown>;
   result?: unknown;
+  /** Agar tool result large tha aur resource store mein gaya, to yahan URI hoga */
+  resourceUri?: string;
+}
+
+// ─── MCP Resource Types ───────────────────────────────────────
+
+/** MCP resource mechanism se fetched GeoJSON resource ka descriptor */
+export interface GeoJSONResource {
+  uri: string;       // e.g. "geojson://resource/uuid"
+  sizeBytes: number;
+  storedAt: number;
+  expiresAt: number;
 }
 
 // ─── MCP Adapter Interface ────────────────────────────────────

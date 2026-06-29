@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { useModelSettingsStore } from "./useModelSettingsStore";
 import { ChatMessage } from "@/types/mcp.types";
 import { toast } from "sonner";
+import { useMapStore } from "./useMapStore";
 
 export interface ChatSession {
   id: string;
@@ -27,14 +28,17 @@ interface ChatState {
 
   isChatOpen: boolean;
   isChatMinimized: boolean;
+  userLocation: { lat: number; lng: number } | null;
 
   sendMessage: (text: string) => Promise<void>;
+  editAndResendMessage: (messageId: string, newText: string) => Promise<void>;
   clearMessages: () => void;
   clearError: () => void;
   setChatOpen: (open: boolean) => void;
   toggleMinimize: () => void;
   setActiveSession: (id: string) => void;
   createNewSession: () => void;
+  initUserLocation: () => Promise<void>;
 }
 
 function generateId(): string {
@@ -68,13 +72,19 @@ export const useChatStore = create<ChatState>((set, get) => {
   error: null,
   isChatOpen: false,
   isChatMinimized: false,
+  userLocation: null,
 
   sendMessage: async (text: string) => {
     const currentState = get();
     if (!text.trim() || currentState.isLoading) return;
 
+    // Ensure we have location before sending if possible (wait max 3 seconds)
+    if (!currentState.userLocation) {
+      await get().initUserLocation();
+    }
+
     // If no active session, create one
-    if (!currentState.activeSessionId) {
+    if (!get().activeSessionId) {
       get().createNewSession();
     }
     if (!text.trim() || get().isLoading) return;
@@ -129,10 +139,11 @@ export const useChatStore = create<ChatState>((set, get) => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: [...conversationHistory, { role: "user", content: text.trim() }],
+          messages: conversationHistory,
           modelId: model.id,
           provider: model.provider,
           apiKey,
+          userLocation: get().userLocation,
         }),
       });
 
@@ -146,13 +157,19 @@ export const useChatStore = create<ChatState>((set, get) => {
       const data = await response.json();
       toast.success("Received response");
 
-      // Replace loading message with actual response
+      // Extract commands from the AI's structured response
+      if (data.content && Array.isArray(data.content.commands)) {
+        useMapStore.getState().executeCommands(data.content.commands);
+      }
+
+      // Replace loading message with actual response text
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: data.content,
+        content: data.content?.text || "*(No response text)*",
         timestamp: Date.now(),
         toolCalls: data.toolCalls,
+        usage: data.usage,
         isLoading: false,
       };
 
@@ -174,11 +191,54 @@ export const useChatStore = create<ChatState>((set, get) => {
          toast.error(message);
       }
 
+      // Format the error nicely as Markdown
+      let formattedMarkdown = `### ⚠️ API Error\n\n`;
+      const jsonStartIndex = message.indexOf('[{');
+      
+      if (jsonStartIndex !== -1) {
+        const mainMessage = message.substring(0, jsonStartIndex).trim();
+        formattedMarkdown += `**Message:** ${mainMessage}\n\n`;
+        
+        try {
+          const jsonStr = message.substring(jsonStartIndex);
+          const parsedJson = JSON.parse(jsonStr);
+          
+          formattedMarkdown += `#### Error Details\n\n`;
+          
+          parsedJson.forEach((item: any) => {
+            if (item['@type'] === 'type.googleapis.com/google.rpc.QuotaFailure') {
+              formattedMarkdown += `**Quota Exceeded**\n`;
+              item.violations?.forEach((v: any) => {
+                formattedMarkdown += `- **Metric**: \`${v.quotaMetric}\`\n`;
+                formattedMarkdown += `- **Limit**: \`${v.quotaValue}\`\n`;
+                if (v.quotaDimensions?.model) {
+                  formattedMarkdown += `- **Model**: \`${v.quotaDimensions.model}\`\n`;
+                }
+              });
+              formattedMarkdown += `\n`;
+            } else if (item['@type'] === 'type.googleapis.com/google.rpc.RetryInfo') {
+               formattedMarkdown += `**Action:** Please retry in \`${item.retryDelay}\`.\n\n`;
+            } else if (item['@type'] === 'type.googleapis.com/google.rpc.Help') {
+               item.links?.forEach((l: any) => {
+                 formattedMarkdown += `[${l.description}](${l.url})\n\n`;
+               });
+            } else {
+               // Fallback for unknown details
+               formattedMarkdown += `\`\`\`json\n${JSON.stringify(item, null, 2)}\n\`\`\`\n\n`;
+            }
+          });
+        } catch(e) {
+          formattedMarkdown += `\`\`\`text\n${message.substring(jsonStartIndex)}\n\`\`\``;
+        }
+      } else {
+        formattedMarkdown += message;
+      }
+
       // Replace loading with error message
       const errorMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: `⚠️ Error: ${message}`,
+        content: formattedMarkdown,
         timestamp: Date.now(),
         isLoading: false,
       };
@@ -195,6 +255,27 @@ export const useChatStore = create<ChatState>((set, get) => {
         return { ...newState, ...syncSession(newState) };
       });
     }
+  },
+
+  editAndResendMessage: async (messageId: string, newText: string) => {
+    const state = get();
+    if (state.isLoading || !newText.trim()) return;
+
+    const messageIndex = state.messages.findIndex(m => m.id === messageId);
+    if (messageIndex === -1) return;
+
+    // Truncate messages to remove this message and everything after it
+    set((s) => {
+      const newState = {
+        ...s,
+        messages: s.messages.slice(0, messageIndex),
+        error: null,
+      };
+      return { ...newState, ...syncSession(newState) };
+    });
+
+    // Call normal sendMessage with the new text
+    await get().sendMessage(newText);
   },
 
   clearMessages: () => set((state) => {
@@ -227,5 +308,30 @@ export const useChatStore = create<ChatState>((set, get) => {
       isChatMinimized: false
     };
   }),
+
+  initUserLocation: async () => {
+    if (get().userLocation) return;
+    
+    if (typeof navigator !== "undefined" && navigator.geolocation) {
+      try {
+        const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, { 
+            enableHighAccuracy: true, 
+            timeout: 3000, 
+            maximumAge: 60000 
+          });
+        });
+        
+        set({
+          userLocation: {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          }
+        });
+      } catch (error) {
+        console.warn("Geolocation error:", error);
+      }
+    }
+  },
 };
 });

@@ -8,9 +8,16 @@ import { useModelSettingsStore } from "@/stores/useModelSettingsStore";
 import { ChatMessageList } from "./ChatMessageList";
 
 export const ChatOverlay = () => {
-  const { isChatOpen, setChatOpen, isChatMinimized, toggleMinimize, messages } = useChatStore();
+  const { isChatOpen, setChatOpen, isChatMinimized, toggleMinimize, messages, initUserLocation } = useChatStore();
   const { getSelectedModel } = useModelSettingsStore();
   
+  // Request user location once when chat becomes visible
+  React.useEffect(() => {
+    if (isChatOpen) {
+      initUserLocation();
+    }
+  }, [isChatOpen, initUserLocation]);
+
   const model = getSelectedModel();
   const aiName = model ? model.name.split(" ")[0] : "AI"; // e.g., "Gemini", "Llama", "GPT-4o"
 
@@ -52,7 +59,7 @@ export const ChatOverlay = () => {
             {/* Expandable Body */}
             <motion.div
               initial={false}
-              animate={{ 
+              animate={{
                 height: isChatMinimized ? 0 : "auto",
                 maxHeight: isChatMinimized ? 0 : "60vh",
               }}

@@ -1,48 +1,30 @@
 /**
- * Mapbox MCP Handler — stdio transport
+ * Mapbox MCP Handler — using official SDK
  * ─────────────────────────────────────────────────────────────
- * Ye handler local Mapbox MCP server process ko spawn karta hai,
- * JSON-RPC messages stdin mein likhta hai,
- * aur stdout se response parse karta hai.
+ * Ye handler local Mapbox MCP server se connect karta hai
+ * using the official @modelcontextprotocol/sdk.
  *
- * MCP Protocol: JSON-RPC 2.0 over stdio (newline-delimited)
+ * It uses a global singleton to keep the MCP process alive
+ * across requests, which is CRITICAL for the Mapbox MCP server's
+ * `temporaryResourceManager` to retain resources between
+ * a `tools/call` and a subsequent `resources/read`.
  * ─────────────────────────────────────────────────────────────
  */
 
-import { spawn } from "child_process";
 import { MAPBOX_MCP_CONFIG } from "@/config/mcp.config";
 import { MCPProxyRequest, MCPProxyResponse, MCPTool } from "@/types/mcp.types";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-// ─── JSON-RPC Helper ──────────────────────────────────────────
+// ─── Global Singleton for MCP Client ─────────────────────────
 
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id: number;
-  method: string;
-  params?: Record<string, unknown>;
-}
+let mcpClient: Client | null = (globalThis as any)._mcpClient || null;
 
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id: number;
-  result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
-}
+async function getMcpClient(): Promise<Client> {
+  if (mcpClient) {
+    return mcpClient;
+  }
 
-// ─── Core: Spawn + Communicate ────────────────────────────────
-
-/**
- * Ek fresh MCP stdio process spawn karo,
- * ek JSON-RPC call karo, response lo, process band karo.
- *
- * Note: Har call pe naya process banata hai — simple aur stateless.
- * Production mein ise singleton/pool se replace kar sakte hain.
- */
-export async function callMCPProcess(
-  method: string,
-  params?: Record<string, unknown>,
-  timeoutMs = 15000
-): Promise<unknown> {
   const scriptPath = MAPBOX_MCP_CONFIG.serverScriptPath;
   const accessToken = MAPBOX_MCP_CONFIG.accessToken;
 
@@ -53,105 +35,61 @@ export async function callMCPProcess(
     );
   }
 
-  return new Promise((resolve, reject) => {
-    const env = {
+  const transport = new StdioClientTransport({
+    command: "node",
+    args: [scriptPath],
+    env: {
       ...process.env,
       MAPBOX_ACCESS_TOKEN: accessToken,
-    };
-
-    // Spawn the MCP server process
-    const child = spawn("node", [scriptPath], {
-      env,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    let stdoutBuffer = "";
-    let initDone = false;
-    let requestId = 1;
-
-    const timeout = setTimeout(() => {
-      child.kill();
-      reject(new Error(`MCP process timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    // Listen to stdout for JSON-RPC responses
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString();
-
-      // Parse newline-delimited JSON-RPC messages
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() ?? ""; // Keep incomplete last line
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-
-        try {
-          const msg: JsonRpcResponse = JSON.parse(trimmed);
-
-          if (!initDone && msg.id === 0) {
-            // Initialize response received — now send the actual request
-            initDone = true;
-            const rpcRequest: JsonRpcRequest = {
-              jsonrpc: "2.0",
-              id: requestId,
-              method,
-              ...(params ? { params } : {}),
-            };
-            child.stdin.write(JSON.stringify(rpcRequest) + "\n");
-          } else if (msg.id === requestId) {
-            // Our actual request's response
-            clearTimeout(timeout);
-            child.kill();
-
-            if (msg.error) {
-              reject(new Error(`MCP Error [${msg.error.code}]: ${msg.error.message}`));
-            } else {
-              resolve(msg.result);
-            }
-          }
-        } catch {
-          // Not valid JSON, skip
-        }
-      }
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      // MCP servers often log to stderr — not always an error
-      const msg = chunk.toString();
-      if (msg.toLowerCase().includes("error")) {
-        console.error("[Mapbox MCP stderr]", msg);
-      }
-    });
-
-    child.on("error", (err) => {
-      clearTimeout(timeout);
-      reject(new Error(`Failed to spawn MCP process: ${err.message}`));
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timeout);
-      if (code !== 0 && code !== null) {
-        reject(new Error(`MCP process exited with code ${code}`));
-      }
-    });
-
-    // Step 1: Send MCP initialize handshake
-    const initRequest: JsonRpcRequest = {
-      jsonrpc: "2.0",
-      id: 0,
-      method: "initialize",
-      params: {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: { name: "mapsense-ai", version: "1.0.0" },
-      },
-    };
-    child.stdin.write(JSON.stringify(initRequest) + "\n");
+    },
   });
+
+  const client = new Client(
+    {
+      name: "mapsense-ai",
+      version: "1.0.0",
+    },
+    {
+      capabilities: {},
+    }
+  );
+
+  await client.connect(transport);
+  mcpClient = client;
+  (globalThis as any)._mcpClient = mcpClient;
+
+  return mcpClient;
 }
 
-// ─── Public Handler ───────────────────────────────────────────
+// ─── Core Execution wrapper ───────────────────────────────────
+
+export async function callMCPProcess(
+  method: string,
+  params?: any
+): Promise<unknown> {
+  const client = await getMcpClient();
+
+  if (method === "tools/list") {
+    return await client.listTools();
+  }
+
+  if (method === "tools/call") {
+    return await client.callTool({
+      name: params.name,
+      arguments: params.arguments,
+    });
+  }
+  
+  if (method === "resources/read") {
+    return await client.readResource({
+      uri: params.uri,
+    });
+  }
+
+  throw new Error(`Unsupported MCP method: ${method}`);
+}
+
+// ─── Public Handler for Next.js API Route ─────────────────────
 
 export async function handleMapboxMCPRequest(
   body: MCPProxyRequest
@@ -159,9 +97,8 @@ export async function handleMapboxMCPRequest(
   try {
     switch (body.action) {
       case "listTools": {
-        const result = await callMCPProcess("tools/list");
-        const tools = (result as { tools: MCPTool[] }).tools;
-        return { success: true, data: tools };
+        const result: any = await callMCPProcess("tools/list");
+        return { success: true, data: result.tools };
       }
 
       case "callTool": {
@@ -176,16 +113,12 @@ export async function handleMapboxMCPRequest(
       }
 
       case "chat": {
-        // For chat: first list tools, then let AI decide which to call
-        // This is a simplified version — you can wire in an LLM here later
-        const toolsResult = await callMCPProcess("tools/list");
-        const tools = (toolsResult as { tools: MCPTool[] }).tools;
-
+        const toolsResult: any = await callMCPProcess("tools/list");
         return {
           success: true,
           data: {
             content: "Tools available from Mapbox MCP server:",
-            availableTools: tools,
+            availableTools: toolsResult.tools,
             userMessage: body.messages?.[body.messages.length - 1]?.content ?? "",
           },
         };
