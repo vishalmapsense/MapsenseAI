@@ -74,10 +74,15 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
               )}
             >
               {message.isLoading ? (
-                <div className="flex items-center gap-1 h-5">
-                  <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "0ms" }} />
-                  <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "150ms" }} />
-                  <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "300ms" }} />
+                <div className="flex items-center gap-3 min-h-5">
+                  <div className="flex items-center gap-1">
+                    <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "0ms" }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "150ms" }} />
+                    <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "300ms" }} />
+                  </div>
+                  {message.content && (
+                    <span className="text-[12px] italic opacity-80">{message.content.replace(/\*/g, '')}</span>
+                  )}
                 </div>
               ) : isUser ? (
                 editingId === message.id ? (
@@ -145,7 +150,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                 
                 {message.usage && (
                   <Tooltip>
-                    <TooltipTrigger asChild>
+                    <TooltipTrigger>
                       <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-md bg-green-500/10 text-green-600 dark:text-green-400 border border-green-500/20 cursor-help">
                         {message.usage.totalTokenCount} Tokens
                       </span>

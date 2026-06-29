@@ -63,6 +63,8 @@ async function getMcpClient(): Promise<Client> {
 
 // ─── Core Execution wrapper ───────────────────────────────────
 
+let cachedTools: any = (globalThis as any)._mcpTools || null;
+
 export async function callMCPProcess(
   method: string,
   params?: any
@@ -70,7 +72,11 @@ export async function callMCPProcess(
   const client = await getMcpClient();
 
   if (method === "tools/list") {
-    return await client.listTools();
+    if (cachedTools) return cachedTools;
+    const result = await client.listTools();
+    cachedTools = result;
+    (globalThis as any)._mcpTools = cachedTools;
+    return result;
   }
 
   if (method === "tools/call") {

@@ -148,28 +148,87 @@ export const useChatStore = create<ChatState>((set, get) => {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        const apiError = errorData.error || "Failed to get response from AI";
+        let apiError = "Failed to get response from AI";
+        try {
+          const errorData = await response.json();
+          if (errorData.error) apiError = errorData.error;
+        } catch (e) {}
         toast.error(`Error: ${apiError}`);
         throw new Error(apiError);
       }
 
-      const data = await response.json();
-      toast.success("Received response");
+      if (!response.body) throw new Error("No response body");
 
-      // Extract commands from the AI's structured response
-      if (data.content && Array.isArray(data.content.commands)) {
-        useMapStore.getState().executeCommands(data.content.commands);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalData: any = null;
+      let streamError: string | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          
+          let event;
+          try {
+            event = JSON.parse(line);
+          } catch (e) {
+            console.error("Failed to parse stream event:", line, e);
+            continue;
+          }
+            
+          if (event.type === "status") {
+            set((state) => {
+              const newState = {
+                ...state,
+                messages: state.messages.map((m) =>
+                  m.id === loadingMessage.id
+                    ? { ...m, content: `*${event.message}*` }
+                    : m
+                ),
+              };
+              return { ...newState, ...syncSession(newState) };
+            });
+          } else if (event.type === "result") {
+            finalData = event.data;
+          } else if (event.type === "error") {
+            streamError = event.message;
+            break;
+          }
+        }
+
+        if (streamError) break;
       }
 
-      // Replace loading message with actual response text
+      if (streamError) {
+        throw new Error(streamError);
+      }
+
+      if (!finalData) {
+        throw new Error("Did not receive final result from server.");
+      }
+
+      toast.success("Received response");
+
+      if (finalData.content && Array.isArray(finalData.content.commands)) {
+        useMapStore.getState().executeCommands(finalData.content.commands);
+      }
+
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: data.content?.text || "*(No response text)*",
+        content: finalData.content?.text || "*(No response text)*",
         timestamp: Date.now(),
-        toolCalls: data.toolCalls,
-        usage: data.usage,
+        toolCalls: finalData.toolCalls,
+        usage: finalData.usage,
         isLoading: false,
       };
 
