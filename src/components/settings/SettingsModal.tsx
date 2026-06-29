@@ -16,8 +16,10 @@ import {
   Palette,
   Settings,
   User,
-  Sparkles,
+  Moon,
+  Sun,
 } from "lucide-react";
+import { useTheme } from "next-themes";
 import {
   ALL_MODELS,
   PROVIDER_API_KEY_URLS,
@@ -264,6 +266,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("models");
   const [filter, setFilter] = useState<"all" | "free" | "paid">("all");
   const { selectedModelId, setSelectedModel } = useModelSettingsStore();
+  const { theme, setTheme } = useTheme();
 
   const filteredModels = ALL_MODELS.filter((m) => {
     if (filter === "free") return m.isFree;
@@ -531,8 +534,52 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       </motion.div>
                     )}
 
-                    {/* ── Theme / General Placeholders ── */}
-                    {["theme", "general", "account"].includes(tab) && (
+                    {/* ── Theme Tab ── */}
+                    {tab === "theme" && (
+                      <motion.div
+                        key="theme"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.15 }}
+                      >
+                        <div>
+                          <h3 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+                            Appearance
+                          </h3>
+                          <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
+                            Customize the look and feel of Mapsense AI.
+                          </p>
+                        </div>
+
+                        <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-lg bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center text-zinc-600 dark:text-zinc-300">
+                                {theme === "dark" ? <Moon className="w-5 h-5" /> : <Sun className="w-5 h-5" />}
+                              </div>
+                              <div>
+                                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-200">Dark Mode</p>
+                                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 italic">
+                                  When enabled, the map base automatically switches to Carto Dark. Your preference is saved securely.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${theme === "dark" ? "bg-blue-500" : "bg-zinc-300 dark:bg-zinc-700"}`}
+                            >
+                              <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${theme === "dark" ? "translate-x-6" : "translate-x-1"}`}
+                              />
+                            </button>
+                          </div>
+                        </div>
+                      </motion.div>
+                    )}
+
+                    {/* ── General / Account Placeholders ── */}
+                    {["general", "account"].includes(tab) && (
                       <motion.div
                         key="placeholder"
                         initial={{ opacity: 0, y: 4 }}
@@ -547,7 +594,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                           {tab === "account" && <User className="w-8 h-8" />}
                         </div>
                         <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-200 capitalize">
-                          {tab === "theme" ? "Appearance" : tab} Settings
+                          {tab} Settings
                         </h3>
                         <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2 max-w-sm">
                           This section is coming soon. You'll be able to configure {tab} preferences here.

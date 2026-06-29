@@ -147,7 +147,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                     Used {tool.toolName}
                   </span>
                 ))}
-                
+
                 {message.usage && (
                   <Tooltip>
                     <TooltipTrigger>

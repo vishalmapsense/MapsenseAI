@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ThemeProvider } from "@/providers/ThemeProvider";
 
 const inter = Inter({
   variable: "--font-sans",
@@ -29,10 +30,18 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
+      suppressHydrationWarning
     >
       <body className="min-h-full flex flex-col" suppressHydrationWarning>
-        <TooltipProvider>{children}</TooltipProvider>
-        <Toaster position="top-right" theme="light" />
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <TooltipProvider>{children}</TooltipProvider>
+          <Toaster position="top-right" />
+        </ThemeProvider>
       </body>
     </html>
   );
