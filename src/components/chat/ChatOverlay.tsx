@@ -32,11 +32,11 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
           animate={!isSplit ? { opacity: 1, y: 0, scale: 1 } : { opacity: 1 }}
           exit={!isSplit ? { opacity: 0, y: 20, scale: 0.95 } : { opacity: 0 }}
           transition={{ duration: 0.2, ease: "easeOut" }}
-          className="w-full z-20 pointer-events-none"
+          className="w-full z-20 pointer-events-none flex flex-col min-h-0 shrink"
         >
-          <div className={`w-full flex flex-col pointer-events-auto transition-all duration-300 rounded-3xl overflow-hidden ${isTransparentMode ? 'bg-transparent border-transparent shadow-none' : 'bg-background/10 dark:bg-background/10 backdrop-blur-xs border'}`}>
+          <div className={`w-full flex flex-col min-h-0 shrink pointer-events-auto transition-all duration-300 rounded-3xl overflow-hidden ${isTransparentMode ? 'bg-transparent border-transparent shadow-none' : 'bg-background/10 dark:bg-background/10 backdrop-blur-xs border'}`}>
             {/* Header */}
-            <div className="flex items-center justify-between px-4 py-2 border-b bg-background/50">
+            <div className="flex items-center justify-between px-4 py-2 border-b bg-background/50 shrink-0">
               <div className="text-xs font-semibold text-foreground/80 flex items-center gap-2">
                 <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
                 {aiName}
@@ -65,7 +65,7 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
                     {layout === "split" ? "Floating Layout" : "Split Layout"}
                   </TooltipContent>
                 </Tooltip>
-                
+
                 <Tooltip>
                   <TooltipTrigger
                     onClick={toggleMinimize}
@@ -77,8 +77,8 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
                     {isChatMinimized ? "Expand" : "Minimize"}
                   </TooltipContent>
                 </Tooltip>
-
-                <Tooltip>
+                {/* TODO for future use */}
+                {/* <Tooltip>
                   <TooltipTrigger
                     onClick={() => setChatOpen(false)}
                     className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted rounded-md transition-colors"
@@ -88,7 +88,7 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
                   <TooltipContent side="top">
                     Close
                   </TooltipContent>
-                </Tooltip>
+                </Tooltip> */}
               </div>
             </div>
 
@@ -98,13 +98,12 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
               animate={{
                 height: isChatMinimized ? 0 : "auto",
               }}
-              className="overflow-hidden flex flex-col"
+              className="overflow-hidden flex flex-col min-h-0 shrink"
             >
-              <div className={`w-full bg-transparent relative ${
-                isSplit 
-                  ? 'h-[75vh] max-h-[800px] transition-all duration-300 delay-500' // Delayed height increase
+              <div className={`w-full bg-transparent relative flex flex-col min-h-0 shrink ${isSplit
+                  ? 'h-[80vh] max-h-[90vh] transition-all duration-300 delay-500' // Delayed height increase
                   : 'h-[60vh] sm:h-[50vh] max-h-[600px] transition-all duration-300 delay-0' // Immediate height decrease
-              }`}>
+                }`}>
                 <ChatMessageList messages={messages} aiName={aiName} />
               </div>
             </motion.div>

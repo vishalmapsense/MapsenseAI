@@ -105,10 +105,10 @@ export const MapWorkspace = () => {
 
       {/* Chat Panel (Floating / Split) */}
       <div 
-        className={`absolute z-20 pointer-events-none flex flex-col justify-end gap-2 ease-in-out ${
+        className={`absolute z-20 pointer-events-none flex flex-col justify-end gap-2 ease-in-out top-16 bottom-2 ${
           effectiveLayout === 'split'
-            ? 'bottom-6 left-2 w-full max-w-[360px] transition-all duration-500 delay-0' // Translated to left immediately
-            : 'bottom-6 left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 transition-all duration-500 delay-300' // Delayed centering
+            ? 'left-2 w-full max-w-[360px] transition-all duration-500 delay-0' // Translated to left immediately
+            : 'left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 transition-all duration-500 delay-300' // Delayed centering
         }`}
       >
         <ChatOverlay isSplit={effectiveLayout === 'split'} />

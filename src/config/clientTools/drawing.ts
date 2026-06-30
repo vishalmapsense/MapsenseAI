@@ -110,11 +110,11 @@ export const DRAWING_TOOLS: ClientToolDefinition[] = [
   {
     type: "function",
     name: "map_buffer_geometry",
-    description: "Create a buffer around the currently selected geometry.",
+    description: "Create a buffer around the currently selected geometry. If no geometry is selected, draw a default buffer (circle) at the center of the current map view. If the user provides a distance, use it; otherwise, default to 1.",
     parameters: {
       type: "object",
       properties: {
-        distance: { type: "number", description: "Buffer distance in kilometers." }
+        distance: { type: "number", description: "Buffer distance in kilometers. Default is 1 if not provided by user." }
       },
       required: ["distance"],
       additionalProperties: false
