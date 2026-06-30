@@ -29,6 +29,7 @@ interface ChatState {
 
   isChatOpen: boolean;
   isChatMinimized: boolean;
+  isTransparentMode: boolean;
   userLocation: { lat: number; lng: number } | null;
 
   sendMessage: (text: string) => Promise<void>;
@@ -37,6 +38,7 @@ interface ChatState {
   clearError: () => void;
   setChatOpen: (open: boolean) => void;
   toggleMinimize: () => void;
+  toggleTransparentMode: () => void;
   setActiveSession: (id: string) => void;
   createNewSession: () => void;
   initUserLocation: () => Promise<void>;
@@ -73,6 +75,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   error: null,
   isChatOpen: false,
   isChatMinimized: false,
+  isTransparentMode: false,
   userLocation: null,
 
   sendMessage: async (text: string) => {
@@ -367,6 +370,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   clearError: () => set({ error: null }),
   setChatOpen: (open: boolean) => set({ isChatOpen: open, isChatMinimized: false }),
   toggleMinimize: () => set((state) => ({ isChatMinimized: !state.isChatMinimized })),
+  toggleTransparentMode: () => set((state) => ({ isTransparentMode: !state.isTransparentMode })),
   
   setActiveSession: (id: string) => set((state) => {
     const session = state.sessions.find(s => s.id === id);

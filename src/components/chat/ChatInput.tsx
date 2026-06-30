@@ -6,7 +6,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/useChatStore";
 import { Spinner } from "@/components/ui/spinner";
 
-export const ChatInput = () => {
+export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const { sendMessage, isLoading } = useChatStore();
@@ -49,8 +49,8 @@ export const ChatInput = () => {
   const canSubmit = value.trim().length > 0 && !isLoading;
 
   return (
-    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 z-20">
-      <div className="relative flex items-end w-full rounded-3xl bg-background border shadow-lg overflow-hidden transition-shadow focus-within:shadow-xl focus-within:border-ring/50">
+    <div className="w-full z-20 pointer-events-none">
+      <div className="relative flex items-end w-full rounded-3xl bg-background border shadow-lg overflow-hidden transition-shadow focus-within:shadow-xl focus-within:border-ring/50 pointer-events-auto">
         <button
           className="p-3 text-muted-foreground hover:text-foreground transition-colors rounded-full mb-1 ml-1"
           title="Attach file"
@@ -64,7 +64,7 @@ export const ChatInput = () => {
           value={value}
           onChange={handleInput}
           onKeyDown={handleKeyDown}
-          placeholder="Ask anything about the map... (Enter to send, Shift+Enter for newline)"
+          placeholder="Ask anything about the map..."
           className="flex-1 min-h-[56px] max-h-[200px] border-0 focus-visible:ring-0 shadow-none resize-none py-4 px-2 text-base bg-transparent"
           rows={1}
           disabled={isLoading}
@@ -85,7 +85,7 @@ export const ChatInput = () => {
         </button>
       </div>
 
-      <div className="text-center mt-2 text-xs text-muted-foreground font-medium">
+      <div className="text-center mt-0.5 text-[10px] text-muted-foreground/70">
         Mapsense AI can make mistakes. Verify important geospatial data.
       </div>
     </div>

@@ -71,6 +71,20 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   map_set_base: "SET_BASE_MAP",
   map_clear_layers: "CLEAR_MAP",
   map_toggle_layer: "TOGGLE_LAYER",
+  map_add_marker: "ADD_MARKER",
+  map_remove_marker: "REMOVE_MARKER",
+  map_move_marker: "MOVE_MARKER",
+  map_draw_point: "DRAW_POINT",
+  map_draw_line: "DRAW_LINE",
+  map_draw_polygon: "DRAW_POLYGON",
+  map_draw_circle: "DRAW_CIRCLE",
+  map_draw_rectangle: "DRAW_RECTANGLE",
+  map_edit_geometry: "EDIT_GEOMETRY",
+  map_delete_geometry: "DELETE_GEOMETRY",
+  map_simplify_geometry: "SIMPLIFY_GEOMETRY",
+  map_buffer_geometry: "BUFFER_GEOMETRY",
+  map_split_polygon: "SPLIT_POLYGON",
+  map_merge_polygons: "MERGE_POLYGONS",
 };
 
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────
@@ -216,7 +230,7 @@ export async function POST(req: NextRequest) {
                 properties: {
                   type: {
                     type: SchemaType.STRING,
-                    description: "Command type: ADD_LAYER, FIT_BOUNDS, or CLEAR_MAP",
+                    description: "Command type: ADD_LAYER, FIT_BOUNDS, or CLEAR_MAP. IMPORTANT: Do NOT use CLEAR_MAP if the user just wants to delete a specific shape; use map_delete_geometry tool instead. Only use CLEAR_MAP if they explicitly want to wipe the entire map.",
                   },
                 },
                 required: ["type"]

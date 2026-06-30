@@ -1,19 +1,39 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatOverlay } from "@/components/chat/ChatOverlay";
 import { Menu, Layers, Map as MapIcon, Globe, Moon } from "lucide-react";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 import { useMapStore, BaseMapType } from "@/stores/useMapStore";
+import { useChatStore } from "@/stores/useChatStore";
 
 import { OpenLayersMap } from "./OpenLayersMap";
 
 export const MapWorkspace = () => {
-  const { setMobileOpen } = useSidebarStore();
+  const { setMobileOpen, layout } = useSidebarStore();
+  const setChatOpen = useChatStore(state => state.setChatOpen);
   const baseMap = useMapStore(state => state.baseMap);
   const setBaseMap = useMapStore(state => state.setBaseMap);
   const [showBaseMapMenu, setShowBaseMapMenu] = useState(false);
+  const [isDesktop, setIsDesktop] = useState(true);
+
+  // Check screen size to enforce desktop-only split mode
+  useEffect(() => {
+    const checkDesktop = () => setIsDesktop(window.innerWidth >= 768);
+    checkDesktop();
+    window.addEventListener("resize", checkDesktop);
+    return () => window.removeEventListener("resize", checkDesktop);
+  }, []);
+
+  const effectiveLayout = (layout === "split" && isDesktop) ? "split" : "floating";
+
+  // Automatically open the chat when the layout is set to split
+  useEffect(() => {
+    if (effectiveLayout === "split") {
+      setChatOpen(true);
+    }
+  }, [effectiveLayout, setChatOpen]);
 
   const baseMaps: { id: BaseMapType; name: string; icon: React.ReactNode }[] = [
     { id: "osm", name: "OpenStreetMap", icon: <MapIcon className="w-4 h-4" /> },
@@ -24,15 +44,13 @@ export const MapWorkspace = () => {
 
   return (
     <main className="relative flex-1 h-full w-full bg-[#f8f9fa] dark:bg-[#0a0a0a] overflow-hidden">
-      {/* 
-        Interactive OpenLayers Map
-      */}
+      {/* Interactive OpenLayers Map */}
       <div className="absolute inset-0 z-0">
         <OpenLayersMap />
       </div>
 
       {/* Top Bar Overlay */}
-      <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-10 pointer-events-none">
+      <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-20 pointer-events-none">
         {/* Left Section */}
         <div className="flex items-center gap-3">
           {/* Mobile Sidebar Toggle */}
@@ -44,7 +62,7 @@ export const MapWorkspace = () => {
           </button>
 
           {/* Top Left Logo */}
-          <div className="pointer-events-auto font-semibold text-foreground/80 tracking-tight text-lg px-2">
+          <div className="pointer-events-auto font-semibold text-foreground/80 tracking-tight text-lg px-2 drop-shadow-sm">
             MapsenseAI
           </div>
         </div>
@@ -85,11 +103,17 @@ export const MapWorkspace = () => {
         </div>
       </div>
 
-      {/* Floating Chat Panel */}
-      <ChatOverlay />
-
-      {/* Chat Input Overlay */}
-      <ChatInput />
+      {/* Chat Panel (Floating / Split) */}
+      <div 
+        className={`absolute z-20 pointer-events-none flex flex-col justify-end gap-2 ease-in-out ${
+          effectiveLayout === 'split'
+            ? 'bottom-6 left-2 w-full max-w-[360px] transition-all duration-500 delay-0' // Translated to left immediately
+            : 'bottom-6 left-1/2 -translate-x-1/2 w-full max-w-3xl px-4 transition-all duration-500 delay-300' // Delayed centering
+        }`}
+      >
+        <ChatOverlay isSplit={effectiveLayout === 'split'} />
+        <ChatInput />
+      </div>
     </main>
   );
 };

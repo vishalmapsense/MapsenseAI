@@ -10,13 +10,16 @@
 import { SchemaType, type FunctionDeclaration } from "@google/generative-ai";
 import { NAVIGATION_TOOLS } from "./navigation";
 import { LAYER_TOOLS } from "./layers";
+import { DRAWING_TOOLS } from "./drawing";
 import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "./types";
+import type { MCPTool } from "@/types/mcp.types";
 
 // ─── Raw Definitions (Provider-Agnostic) ──────────────────────
 
 export const CLIENT_TOOL_DEFINITIONS: ClientToolDefinition[] = [
   ...NAVIGATION_TOOLS,
   ...LAYER_TOOLS,
+  ...DRAWING_TOOLS,
 ];
 
 // ─── JSON Schema → Gemini Schema Converter ────────────────────
@@ -86,6 +89,23 @@ function toGeminiFunctionDeclaration(tool: ClientToolDefinition): FunctionDeclar
 export const ALL_CLIENT_TOOLS: FunctionDeclaration[] =
   CLIENT_TOOL_DEFINITIONS.map(toGeminiFunctionDeclaration);
 
+/**
+ * Returns all client tools in standard MCP (Model Context Protocol) format.
+ * This makes the tools agnostic and consumable by ANY external LLM (Claude, OpenAI, etc.)
+ * that supports the MCP specification, rather than being Gemini-specific.
+ */
+export function getClientToolsAsMCP(): MCPTool[] {
+  return CLIENT_TOOL_DEFINITIONS.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: {
+      type: "object",
+      properties: tool.parameters.properties,
+      ...(tool.parameters.required ? { required: tool.parameters.required } : {}),
+    },
+  }));
+}
+
 // ─── Lookup Set (for O(1) checks) ─────────────────────────────
 
 const CLIENT_TOOL_NAMES = new Set(CLIENT_TOOL_DEFINITIONS.map((t) => t.name));
@@ -117,4 +137,5 @@ export function buildClientToolResponse(
 
 export { NAVIGATION_TOOLS } from "./navigation";
 export { LAYER_TOOLS } from "./layers";
+export { DRAWING_TOOLS } from "./drawing";
 export type { ClientToolDefinition } from "./types";

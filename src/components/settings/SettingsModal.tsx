@@ -18,6 +18,7 @@ import {
   User,
   Moon,
   Sun,
+  Layout,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
@@ -27,6 +28,7 @@ import {
   type AIModel,
   type ModelProvider,
 } from "@/stores/useModelSettingsStore";
+import { useSidebarStore } from "@/stores/useSidebarStore";
 
 // ─── Provider Icons ───────────────────────────────────────────
 
@@ -266,6 +268,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("models");
   const [filter, setFilter] = useState<"all" | "free" | "paid">("all");
   const { selectedModelId, setSelectedModel } = useModelSettingsStore();
+  const { layout, setLayout } = useSidebarStore();
   const { theme, setTheme } = useTheme();
 
   const filteredModels = ALL_MODELS.filter((m) => {
@@ -552,7 +555,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                           </p>
                         </div>
 
-                        <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
+                        <div className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30 mb-4">
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-3">
                               <div className="w-10 h-10 rounded-lg bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center text-zinc-600 dark:text-zinc-300">
@@ -573,6 +576,36 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                                 className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${theme === "dark" ? "translate-x-6" : "translate-x-1"}`}
                               />
                             </button>
+                          </div>
+                        </div>
+
+                        <div className="hidden md:block p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-lg bg-zinc-200 dark:bg-zinc-800 flex items-center justify-center text-zinc-600 dark:text-zinc-300">
+                                <Layout className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-200">Workspace Layout</p>
+                                <p className="text-[11px] text-zinc-500 dark:text-zinc-400 italic">
+                                  Choose between Floating map layout or Split view layout.
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex bg-zinc-200/50 dark:bg-zinc-800/50 p-1 rounded-lg gap-1">
+                               <button 
+                                 onClick={() => setLayout('floating')} 
+                                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${layout === 'floating' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
+                               >
+                                 Floating
+                               </button>
+                               <button 
+                                 onClick={() => setLayout('split')} 
+                                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${layout === 'split' ? 'bg-white dark:bg-zinc-700 shadow-sm text-zinc-900 dark:text-zinc-100' : 'text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-300'}`}
+                               >
+                                 Split
+                               </button>
+                            </div>
                           </div>
                         </div>
                       </motion.div>

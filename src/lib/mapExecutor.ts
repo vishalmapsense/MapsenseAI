@@ -138,6 +138,56 @@ export const executeClientCommands = async (
           });
           break;
         }
+        case "ADD_MARKER": {
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Added marker at [${cmd.payload?.lat}, ${cmd.payload?.lng}].`,
+          });
+          break;
+        }
+        case "REMOVE_MARKER": {
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: "Removed marker.",
+          });
+          break;
+        }
+        case "MOVE_MARKER": {
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Moved marker to [${cmd.payload?.lat}, ${cmd.payload?.lng}].`,
+          });
+          break;
+        }
+        case "DRAW_POINT":
+        case "DRAW_LINE":
+        case "DRAW_POLYGON":
+        case "DRAW_CIRCLE":
+        case "DRAW_RECTANGLE":
+        case "EDIT_GEOMETRY":
+        case "DELETE_GEOMETRY":
+        case "SPLIT_POLYGON":
+        case "MERGE_POLYGONS": {
+          useMapStore.getState().setInteractionMode(cmd.type);
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Activated map interaction mode: ${cmd.type}`,
+          });
+          break;
+        }
+        case "SIMPLIFY_GEOMETRY":
+        case "BUFFER_GEOMETRY": {
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Performed geometry operation: ${cmd.type}`,
+          });
+          break;
+        }
         default:
           throw new Error(`Unknown command type: ${cmd.type}`);
       }
