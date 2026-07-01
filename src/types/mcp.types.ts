@@ -24,6 +24,7 @@ export interface ChatMessage {
   toolCalls?: MCPToolCall[];
   isLoading?: boolean;
   usage?: TokenUsage;
+  executionMessages?: string[];
 }
 
 // ─── MCP Tool Types ────────────────────────────────────────────

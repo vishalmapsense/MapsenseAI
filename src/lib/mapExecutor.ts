@@ -1,5 +1,6 @@
 import type Map from "ol/Map";
-import { fromLonLat } from "ol/proj";
+import { fromLonLat, toLonLat } from "ol/proj";
+import * as turf from "@turf/turf";
 import type { MapCommand } from "@/stores/useMapStore";
 import { useMapStore } from "@/stores/useMapStore";
 
@@ -122,7 +123,7 @@ export const executeClientCommands = async (
           break;
         }
         case "CLEAR_MAP": {
-          // Handled by store state updates (executeCommands) but we log success here
+          useMapStore.getState().setMapFeatures([]);
           results.push({
             success: true,
             code: "SUCCESS",
@@ -138,12 +139,56 @@ export const executeClientCommands = async (
           });
           break;
         }
+        case "ADD_GEOJSON": {
+          const geojson = cmd.payload?.geojson;
+          const label = cmd.payload?.label || "Custom Feature";
+          if (geojson) {
+            // Optional: inject label into properties if it doesn't have one
+            if (geojson.type === "Feature" && !geojson.properties) {
+              geojson.properties = { name: label };
+            } else if (geojson.type === "FeatureCollection" && geojson.features) {
+              geojson.features.forEach((f: any) => {
+                if (!f.properties) f.properties = { name: label };
+              });
+            }
+
+            const store = useMapStore.getState();
+            store.setMapFeatures([...store.mapFeatures, geojson]);
+
+            results.push({
+              success: true,
+              code: "SUCCESS",
+              message: `Added custom GeoJSON to the map.`,
+            });
+          } else {
+            throw new Error("Missing geojson payload.");
+          }
+          break;
+        }
         case "ADD_MARKER": {
-          results.push({
-            success: true,
-            code: "SUCCESS",
-            message: `Added marker at [${cmd.payload?.lat}, ${cmd.payload?.lng}].`,
-          });
+          const lat = cmd.payload?.lat;
+          const lng = cmd.payload?.lng;
+          const label = cmd.payload?.label || "Marker";
+          const zoom = cmd.payload?.zoom;
+          
+          if (typeof lat === "number" && typeof lng === "number") {
+            const pointFeature = turf.point([lng, lat], { 
+              name: label, 
+              type: "marker",
+              ...(zoom && { zoom })
+            });
+            
+            const store = useMapStore.getState();
+            store.setMapFeatures([...store.mapFeatures, pointFeature as any]);
+
+            results.push({
+              success: true,
+              code: "SUCCESS",
+              message: `Added marker '${label}' at [${lat}, ${lng}].`,
+            });
+          } else {
+            throw new Error("Missing lat/lng for marker.");
+          }
           break;
         }
         case "REMOVE_MARKER": {
@@ -179,13 +224,32 @@ export const executeClientCommands = async (
           });
           break;
         }
-        case "SIMPLIFY_GEOMETRY":
-        case "BUFFER_GEOMETRY": {
+        case "SIMPLIFY_GEOMETRY": {
           results.push({
             success: true,
             code: "SUCCESS",
             message: `Performed geometry operation: ${cmd.type}`,
           });
+          break;
+        }
+        case "BUFFER_GEOMETRY": {
+          const distance = cmd.payload?.distance || 1;
+          const centerProj = view.getCenter();
+          if (centerProj) {
+            const center = toLonLat(centerProj);
+            const bufferFeature = turf.circle(center, distance, { units: 'kilometers' });
+            
+            const store = useMapStore.getState();
+            store.setMapFeatures([...store.mapFeatures, bufferFeature as any]);
+
+            results.push({
+              success: true,
+              code: "SUCCESS",
+              message: `Drew a ${distance}km buffer at the center of the map.`,
+            });
+          } else {
+            throw new Error("Could not determine map center for buffer.");
+          }
           break;
         }
         default:

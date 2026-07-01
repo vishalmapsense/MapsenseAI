@@ -128,11 +128,26 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                   </div>
                 )
               ) : (
-                <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
-                  <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
-                    {message.content || "*(No text provided)*"}
-                  </ReactMarkdown>
-                </div>
+                <>
+                  <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
+                    <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
+                      {message.content || "*(No text provided)*"}
+                    </ReactMarkdown>
+                  </div>
+                  {message.executionMessages && (
+                    <details className="mt-2 text-[9px] text-muted-foreground opacity-80 border-t border-border/50 pt-2 group">
+                      <summary className="font-semibold text-foreground/70 cursor-pointer flex items-center gap-1.5 select-none hover:text-foreground/90 transition-colors list-none [&::-webkit-details-marker]:hidden">
+                        <span className="text-[7px] transition-transform group-open:rotate-90">▶</span>
+                        Map Actions ({message.executionMessages.length})
+                      </summary>
+                      <div className="flex flex-col gap-0.5 mt-1.5 pl-3 border-l-2 border-border/30 ml-1 py-0.5">
+                        {message.executionMessages.map((msg, i) => (
+                          <span key={i}>{msg}</span>
+                        ))}
+                      </div>
+                    </details>
+                  )}
+                </>
               )}
             </div>
 

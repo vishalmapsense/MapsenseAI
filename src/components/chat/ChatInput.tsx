@@ -82,12 +82,15 @@ const ModelSelector = () => {
 
 export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
   const [value, setValue] = useState("");
+  const [isRecording, setIsRecording] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const recognitionRef = useRef<any>(null);
+  const originalValueRef = useRef("");
+  
   const { sendMessage, isLoading } = useChatStore();
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
-
     // Auto-resize textarea
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
@@ -95,18 +98,96 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
     }
   };
 
+  const toggleRecording = useCallback(() => {
+    if (isRecording) {
+      recognitionRef.current?.stop();
+      setIsRecording(false);
+      return;
+    }
+
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      alert("Speech recognition is not supported in this browser. Please use Chrome or Edge.");
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-IN";
+    recognition.interimResults = true;
+    recognition.continuous = true;
+
+    // Store the text that was already in the input before we started speaking
+    originalValueRef.current = value ? value.trim() + " " : "";
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = "";
+      let finalTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        if (event.results[i].isFinal) {
+          finalTranscript += event.results[i][0].transcript;
+        } else {
+          interimTranscript += event.results[i][0].transcript;
+        }
+      }
+      
+      if (finalTranscript) {
+        originalValueRef.current += finalTranscript + " ";
+        setValue(originalValueRef.current + interimTranscript);
+      } else {
+        setValue(originalValueRef.current + interimTranscript);
+      }
+      
+      if (textareaRef.current) {
+        textareaRef.current.style.height = "auto";
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 150)}px`;
+      }
+    };
+
+    recognition.onerror = (event: any) => {
+      if (event.error === 'no-speech') {
+        // Ignore "no-speech" errors as they just mean the user was silent
+        setIsRecording(false);
+        return;
+      }
+      console.error("Speech recognition error:", event.error);
+      setIsRecording(false);
+    };
+
+    recognition.onend = () => {
+      setIsRecording(false);
+    };
+
+    recognitionRef.current = recognition;
+    recognition.start();
+    setIsRecording(true);
+  }, [isRecording, value]);
+
+  // Clean up recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
+      }
+    };
+  }, []);
+
   const handleSubmit = useCallback(async () => {
+    if (isRecording) {
+      recognitionRef.current?.stop();
+      setIsRecording(false);
+    }
+
     const trimmed = value.trim();
     if (!trimmed || isLoading) return;
 
     setValue("");
-    // Reset textarea height
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
 
     await sendMessage(trimmed);
-  }, [value, isLoading, sendMessage]);
+  }, [value, isLoading, sendMessage, isRecording]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -115,7 +196,6 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
     }
   };
 
-  // Focus textarea on mount
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
@@ -124,7 +204,7 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
 
   return (
     <div className="w-full z-20 pointer-events-none px-2 pb-2">
-      <div className="relative flex flex-col w-full rounded-[20px] bg-background border border-border/50 shadow-md focus-within:shadow-lg focus-within:border-border pointer-events-auto p-2 transition-all">
+      <div className={`relative flex flex-col w-full rounded-[20px] bg-background border ${isRecording ? 'border-red-500/50 shadow-red-500/10' : 'border-border/50'} shadow-md focus-within:shadow-lg focus-within:border-border pointer-events-auto p-2 transition-all`}>
         
         {/* Input */}
         <Textarea
@@ -132,7 +212,7 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
           value={value}
           onChange={handleInput}
           onKeyDown={handleKeyDown}
-          placeholder="Message Mapsense..."
+          placeholder={isRecording ? "Listening..." : "Message Mapsense..."}
           className="w-full min-h-[40px] max-h-[150px] border-0 focus-visible:ring-0 shadow-none resize-none py-1.5 px-2 text-[13px] bg-transparent !ring-0 !outline-none"
           rows={1}
           disabled={isLoading}
@@ -158,8 +238,13 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
           <div className="flex items-center gap-1">
             <button
               type="button"
-              title="Voice input"
-              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-full transition-colors shrink-0"
+              onClick={toggleRecording}
+              title={isRecording ? "Stop recording" : "Voice input"}
+              className={`p-1.5 rounded-full transition-colors shrink-0 flex items-center justify-center ${
+                isRecording 
+                  ? "bg-red-500/10 text-red-500 hover:bg-red-500/20 animate-pulse" 
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              }`}
             >
               <Mic className="w-4 h-4" />
             </button>

@@ -7,32 +7,64 @@ import { INTENT_CLASSIFICATION_PROMPT, MAIN_ORCHESTRATOR_PROMPT } from "@/config
 import { ALL_CLIENT_TOOLS, isClientTool, buildClientToolResponse } from "@/config/clientTools";
 import type { MapCommand } from "@/stores/useMapStore";
 
-// ─── Helper: GeoJSON extract karo tool result se ─────────────────────────────
-function extractGeoJSON(data: any): any | null {
-  if (!data) return null;
-  if (["FeatureCollection", "Feature"].includes(data.type)) {
-    return data;
+// ─── Helper: Any GeoJSON-like data ko FeatureCollection me normalize karo ────
+const GEOMETRY_TYPES = ["Point","MultiPoint","LineString","MultiLineString","Polygon","MultiPolygon","GeometryCollection"];
+
+function normalizeToFeatureCollection(data: any): any | null {
+  if (!data || typeof data !== "object") return null;
+
+  // Already a FeatureCollection
+  if (data.type === "FeatureCollection") {
+    return {
+      type: "FeatureCollection",
+      features: Array.isArray(data.features)
+        ? data.features.filter((f: any) => f && f.type === "Feature" && f.geometry)
+        : [],
+    };
   }
-  if (data.routes && Array.isArray(data.routes) && data.routes.length > 0) {
-    const route = data.routes[0];
-    if (route.geometry) {
-      return {
-        type: "FeatureCollection",
-        features: [
-          {
-            type: "Feature",
-            geometry: route.geometry,
-            properties: {
-              distance: route.distance,
-              duration: route.duration,
-            },
-          },
-        ],
-      };
-    }
+
+  // A single Feature
+  if (data.type === "Feature" && data.geometry) {
+    return { type: "FeatureCollection", features: [data] };
   }
+
+  // A raw geometry object (Point, LineString, Polygon, etc.)
+  if (GEOMETRY_TYPES.includes(data.type)) {
+    return {
+      type: "FeatureCollection",
+      features: [{ type: "Feature", geometry: data, properties: {} }],
+    };
+  }
+
+  // Mapbox Directions API: { routes: [{ geometry, distance, duration }] }
+  if (Array.isArray(data.routes) && data.routes.length > 0) {
+    const features = data.routes
+      .filter((r: any) => r.geometry)
+      .map((r: any) => ({
+        type: "Feature",
+        geometry: r.geometry,
+        properties: { distance: r.distance, duration: r.duration },
+      }));
+    if (features.length > 0) return { type: "FeatureCollection", features };
+  }
+
+  // Mapbox Isochrone API: { features: [...] } at top level
+  if (Array.isArray(data.features)) {
+    const features = data.features.filter((f: any) => f && f.geometry);
+    return { type: "FeatureCollection", features };
+  }
+
+  // Mapbox Geocoding: { features: [{center, place_name, geometry}] }
+  if (data.type === "geocode" || (data.attribution && Array.isArray(data.features))) {
+    const features = (data.features || []).filter((f: any) => f && f.geometry);
+    return { type: "FeatureCollection", features };
+  }
+
   return null;
 }
+
+// Legacy alias kept for compatibility
+const extractGeoJSON = normalizeToFeatureCollection;
 
 function extractGeoJSONFromToolResult(res: unknown): unknown | null {
   if (!res || typeof res !== "object") return null;
@@ -83,6 +115,8 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   map_delete_geometry: "DELETE_GEOMETRY",
   map_simplify_geometry: "SIMPLIFY_GEOMETRY",
   map_buffer_geometry: "BUFFER_GEOMETRY",
+  map_add_geojson: "ADD_GEOJSON",
+  map_load_url: "LOAD_URL",
   map_split_polygon: "SPLIT_POLYGON",
   map_merge_polygons: "MERGE_POLYGONS",
 };
@@ -208,36 +242,10 @@ export async function POST(req: NextRequest) {
           properties: {
             text: {
               type: SchemaType.STRING,
-              description: "Human-readable AI response in Markdown.",
+              description: "Human-readable AI response in Markdown. All map operations are performed exclusively through tool calls — never through JSON commands.",
             },
-            map_actions: {
-              type: SchemaType.ARRAY,
-              description: "Array of map interactions (zoom, rotate, base map).",
-              items: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  tool: { type: SchemaType.STRING },
-                  args: { type: SchemaType.OBJECT }
-                },
-                required: ["tool", "args"]
-              }
-            },
-            commands: {
-              type: SchemaType.ARRAY,
-              description: "Array of map visualization commands. Use ADD_LAYER when geospatial data should be drawn on the map.",
-              items: {
-                type: SchemaType.OBJECT,
-                properties: {
-                  type: {
-                    type: SchemaType.STRING,
-                    description: "Command type: ADD_LAYER, FIT_BOUNDS, or CLEAR_MAP. IMPORTANT: Do NOT use CLEAR_MAP if the user just wants to delete a specific shape; use map_delete_geometry tool instead. Only use CLEAR_MAP if they explicitly want to wipe the entire map.",
-                  },
-                },
-                required: ["type"]
-              }
-            }
           },
-          required: ["text", "commands"]
+          required: ["text"],
         };
 
         // When tools are available, use AUTO mode so the model decides when to call tools.
@@ -282,6 +290,46 @@ export async function POST(req: NextRequest) {
             
             // ── Client Tool Path ──────────────────────────────────
             if (isClientTool(call.name)) {
+              // Special handling: map_load_url fetches GeoJSON from a URL server-side
+              if (call.name === "map_load_url") {
+                const url = (call.args as any)?.url;
+                const label = (call.args as any)?.label || "Remote Layer";
+                let fetchSuccess = false;
+                if (url) {
+                  try {
+                    sendEvent({ type: "status", message: `Fetching data from URL...` });
+                    const fetchRes = await fetch(url);
+                    if (fetchRes.ok) {
+                      const rawData = await fetchRes.json();
+                      const geoJSON = extractGeoJSON(rawData);
+                      if (geoJSON) {
+                        // Inject label into features
+                        if (geoJSON.type === "FeatureCollection" && Array.isArray(geoJSON.features)) {
+                          geoJSON.features.forEach((f: any) => { if (!f.properties) f.properties = {}; f.properties._label = label; });
+                        } else if (geoJSON.type === "Feature") {
+                          if (!geoJSON.properties) geoJSON.properties = {};
+                          geoJSON.properties._label = label;
+                        }
+                        clientToolCommands.push({ type: "ADD_GEOJSON", payload: { geojson: geoJSON, label } });
+                        fetchSuccess = true;
+                        console.log(`[map_load_url] Fetched and queued GeoJSON from ${url}`);
+                      }
+                    }
+                  } catch (fetchErr: any) {
+                    console.error(`[map_load_url] Failed to fetch ${url}:`, fetchErr.message);
+                  }
+                }
+                functionResponses.push({
+                  functionResponse: {
+                    name: call.name,
+                    response: fetchSuccess
+                      ? { success: true, message: `GeoJSON data fetched from ${url} and added to the map.` }
+                      : { success: false, message: `Failed to fetch or parse GeoJSON from the provided URL.` },
+                  },
+                });
+                continue;
+              }
+
               const commandType = CLIENT_TOOL_COMMAND_MAP[call.name];
               if (commandType) {
                 clientToolCommands.push({ type: commandType, payload: call.args || {} });
@@ -385,71 +433,53 @@ export async function POST(req: NextRequest) {
           finalJson = { text: extractedText, commands: [] };
         }
 
-        // ── Fallback: extract embedded tool_calls from text ──
-        if (clientToolCommands.length === 0) {
-          // 1. Check if they exist in the already parsed JSON
-          const fallbackCalls = finalJson.tool_calls || finalJson.toolCalls || finalJson.map_actions;
-          if (Array.isArray(fallbackCalls)) {
-            for (const tc of fallbackCalls) {
-              const name = tc.name || tc.tool;
-              if (name && isClientTool(name) && CLIENT_TOOL_COMMAND_MAP[name]) {
-                clientToolCommands.push({ type: CLIENT_TOOL_COMMAND_MAP[name], payload: tc.arguments ?? tc.args ?? {} });
-                console.log(`[Fallback Parser JSON] Extracted client tool: ${name}`, tc.arguments ?? tc.args);
-              }
-            }
-          }
-
-          // 2. Regex fallback (if JSON parse partially failed)
-          if (clientToolCommands.length === 0) {
-            const toolCallMatch = rawContent.match(/\{[\s\S]*?"(?:tool_calls|map_actions|toolCalls)"\s*:\s*(\[[\s\S]*?\])/);
-            if (toolCallMatch) {
-              try {
-                const embeddedCalls = JSON.parse(toolCallMatch[1]);
-                for (const tc of embeddedCalls) {
-                  const name = tc.name || tc.tool;
-                  if (name && isClientTool(name) && CLIENT_TOOL_COMMAND_MAP[name]) {
-                    clientToolCommands.push({ type: CLIENT_TOOL_COMMAND_MAP[name], payload: tc.arguments ?? tc.args ?? {} });
-                    console.log(`[Fallback Parser Regex] Extracted client tool: ${name}`, tc.arguments ?? tc.args);
-                  }
-                }
-              } catch { /* ignore parse errors */ }
-            }
-          }
-        }
-
-        // ── Resolve GeoJSON from MCP tool results ──
-        if (finalJson.commands && Array.isArray(finalJson.commands) && toolCallsMade.length > 0) {
-          const collectedGeoJSON: unknown[] = [];
+        // ── Resolve GeoJSON from MCP tool results and push as ADD_GEOJSON client commands ──
+        // NOTE: The LLM no longer generates commands or map_actions. All map operations
+        // go through tool calls. Here we auto-convert any raw MCP results (that the LLM
+        // did not explicitly render via map_add_geojson) into ADD_GEOJSON commands as a
+        // safety net, so data is never silently dropped.
+        if (toolCallsMade.length > 0) {
+          const llmExplicitlyAddedGeoJSON = clientToolCommands.some((c) => c.type === "ADD_GEOJSON");
 
           for (const tc of toolCallsMade) {
+            // Check if the LLM already explicitly rendered this data
+            let alreadyRendered = false;
+            if (tc.resourceUri) {
+              alreadyRendered = clientToolCommands.some(
+                (c) => c.type === "LOAD_URL" && c.payload?.url === tc.resourceUri
+              );
+            } else {
+              // For inline results, if LLM used ADD_GEOJSON, we assume it handled the data
+              alreadyRendered = llmExplicitlyAddedGeoJSON;
+            }
+
+            if (alreadyRendered) continue;
+
+            let geoJSON: any = null;
             if (tc.resourceUri) {
               try {
                 const resolved: any = await callMCPProcess("resources/read", { uri: tc.resourceUri });
                 if (resolved && resolved.contents && resolved.contents.length > 0) {
                   const textData = resolved.contents[0].text;
                   const parsed = JSON.parse(textData);
-                  const geoJSON = extractGeoJSON(parsed);
-                  if (geoJSON) collectedGeoJSON.push(geoJSON);
+                  console.log(`[Post-Processing] Resolved URI Data for ${tc.resourceUri}:`, JSON.stringify(parsed).substring(0, 500) + "...");
+                  geoJSON = extractGeoJSON(parsed);
+                  console.log(`[Post-Processing] Extracted GeoJSON:`, geoJSON ? "Success" : "Failed");
                 }
               } catch (err: any) {
                 console.error(`[Post-Processing] Failed to read resource ${tc.resourceUri}:`, err.message);
               }
             } else {
-              const geoJSON = extractGeoJSONFromToolResult(tc.result);
-              if (geoJSON) collectedGeoJSON.push(geoJSON);
+              geoJSON = extractGeoJSONFromToolResult(tc.result);
             }
-          }
 
-          let geoIndex = 0;
-          finalJson.commands = finalJson.commands.map((cmd: any) => {
-            if (cmd.type === "ADD_LAYER" && geoIndex < collectedGeoJSON.length) {
-              return { ...cmd, payload: collectedGeoJSON[geoIndex++] };
+            if (geoJSON) {
+              clientToolCommands.push({
+                type: "ADD_GEOJSON",
+                payload: { geojson: geoJSON, label: tc.toolName },
+              });
+              console.log(`[Post-Processing] Safety-net: Converted MCP result from '${tc.toolName}' to ADD_GEOJSON.`);
             }
-            return cmd;
-          });
-
-          while (geoIndex < collectedGeoJSON.length) {
-            finalJson.commands.push({ type: "ADD_LAYER", payload: collectedGeoJSON[geoIndex++] });
           }
         }
 

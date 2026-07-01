@@ -45,6 +45,21 @@ export const DRAWING_TOOLS: ClientToolDefinition[] = [
     },
     strict: true
   },
+  {
+    type: "function",
+    name: "map_add_geojson",
+    description: "Render any GeoJSON data onto the map. Handles ALL geometry types: Point, MultiPoint, LineString, MultiLineString (routes/paths), Polygon, MultiPolygon, GeometryCollection, as well as GeoJSON Feature and FeatureCollection objects. Use this for search results, geocoded locations, routes/directions, isochrones, buffer zones, administrative boundaries, or any spatial data returned by an MCP tool. Pass the raw GeoJSON exactly as received — it will be normalized automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        geojson: { type: "object", description: "A valid GeoJSON object: Feature, FeatureCollection, or raw geometry (Point, LineString, Polygon, MultiPolygon, etc.)" },
+        label: { type: "string", description: "Optional name or label for the data layer." }
+      },
+      required: ["geojson"],
+      additionalProperties: false
+    },
+    strict: true
+  },
   
   // Interactive Drawing Modes
   {
@@ -110,7 +125,7 @@ export const DRAWING_TOOLS: ClientToolDefinition[] = [
   {
     type: "function",
     name: "map_buffer_geometry",
-    description: "Create a buffer around the currently selected geometry. If no geometry is selected, draw a default buffer (circle) at the center of the current map view. If the user provides a distance, use it; otherwise, default to 1.",
+    description: "CRITICAL: Always use this tool whenever the user mentions the word 'buffer' or asks to create/draw a buffer. Create a buffer around the currently selected geometry. If no geometry is selected, draw a default buffer (circle) at the center of the current map view. If the user provides a distance, use it; otherwise, default to 1.",
     parameters: {
       type: "object",
       properties: {

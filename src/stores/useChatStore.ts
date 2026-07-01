@@ -224,29 +224,22 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       toast.success("Received response");
 
-      if (finalData.content && Array.isArray(finalData.content.commands)) {
-        useMapStore.getState().executeCommands(finalData.content.commands);
-      }
+      // All map operations now come exclusively from clientToolCommands (via typed tool calls).
+      // The LLM no longer generates a `commands` array.
 
-      let executionText = "";
+      let executionMessages: string[] = [];
       // Execute client tool commands directly (zoom, rotate, etc.) and collect validation results
       if (finalData.clientToolCommands && Array.isArray(finalData.clientToolCommands) && finalData.clientToolCommands.length > 0) {
         const map = useMapStore.getState().mapInstance;
         if (map) {
           const results = await executeClientCommands(map, finalData.clientToolCommands);
-          const messages = results.map(r => r.success ? `✅ ${r.message}` : `❌ ${r.message}`);
-          if (messages.length > 0) {
-            executionText = `\n\n**Map Actions Executed:**\n${messages.join("\n")}`;
-          }
+          executionMessages = results.map(r => r.success ? `✅ ${r.message}` : `❌ ${r.message}`);
         } else {
-          executionText = `\n\n❌ Failed to execute map actions: Map instance not ready.`;
+          executionMessages = [`❌ Failed to execute map actions: Map instance not ready.`];
         }
       }
 
       let content = finalData.content?.text || "";
-      if (executionText) {
-        content = content.trim() ? `${content}${executionText}` : executionText.trim();
-      }
 
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
@@ -256,6 +249,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         toolCalls: finalData.toolCalls,
         usage: finalData.usage,
         isLoading: false,
+        executionMessages: executionMessages.length > 0 ? executionMessages : undefined,
       };
 
       set((state) => {

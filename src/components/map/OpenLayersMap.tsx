@@ -10,7 +10,8 @@ import VectorLayer from "ol/layer/Vector";
 import VectorSource from "ol/source/Vector";
 import GeoJSON from "ol/format/GeoJSON";
 import { Style, Stroke, Fill, Circle as CircleStyle } from "ol/style";
-import { toLonLat, fromLonLat } from "ol/proj";
+import { createEmpty, extend } from "ol/extent";
+import { fromLonLat, toLonLat } from "ol/proj";
 import Draw from "ol/interaction/Draw";
 import Modify from "ol/interaction/Modify";
 import Select from "ol/interaction/Select";
@@ -61,6 +62,7 @@ export const OpenLayersMap = () => {
 
   const interactionModeRef = useRef<string | null>(null);
   const isSyncingRef = useRef<boolean>(false);
+  const previousMapFeaturesRef = useRef<any[]>([]);
   
   // Keep the ref updated with the latest mode for event listeners
   useEffect(() => {
@@ -109,25 +111,36 @@ export const OpenLayersMap = () => {
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
 
-    // Default styles for LLM-generated features
-    const defaultStyle = new Style({
-      stroke: new Stroke({
-        color: "#3b82f6", // Blue-500
-        width: 3,
-      }),
-      fill: new Fill({
-        color: "rgba(59, 130, 246, 0.2)",
-      }),
-      image: new CircleStyle({
-        radius: 6,
-        fill: new Fill({ color: "#ef4444" }), // Red-500 for points
-        stroke: new Stroke({ color: "white", width: 2 }),
-      }),
-    });
+    // Per-feature style function — distinguish LineString to prevent unwanted fills
+    const featureStyleFn = (feature: any) => {
+      const geomType = feature.getGeometry()?.getType();
+      
+      // Default styles for points and polygons
+      const defaultStroke = new Stroke({ color: "#3b82f6", width: 3 });
+      const defaultFill = new Fill({ color: "rgba(59, 130, 246, 0.2)" });
+      
+      if (geomType === "LineString" || geomType === "MultiLineString") {
+        // LineStrings should ONLY have a stroke, no fill
+        return new Style({
+          stroke: defaultStroke,
+        });
+      }
+      
+      // Default style for points / polygons / other geojson
+      return new Style({
+        stroke: defaultStroke,
+        fill: defaultFill,
+        image: new CircleStyle({
+          radius: 6,
+          fill: new Fill({ color: "#ef4444" }),
+          stroke: new Stroke({ color: "white", width: 2 }),
+        }),
+      });
+    };
 
     const vectorLayer = new VectorLayer({
       source: vectorSourceRef.current,
-      style: defaultStyle,
+      style: featureStyleFn,
     });
 
     const map = new Map({
@@ -137,10 +150,10 @@ export const OpenLayersMap = () => {
         vectorLayer,
       ],
       view: new View({
-        center: [0, 0], // Center at [0, 0] (EPSG:3857)
+        center: [0, 0],
         zoom: 2,
       }),
-      controls: [], // Hide default controls for a clean UI
+      controls: [],
     });
 
     mapInstanceRef.current = map;
@@ -217,59 +230,108 @@ export const OpenLayersMap = () => {
     };
   }, []);
 
-  // Watch for new features from LLM
+  // Watch for new features from LLM — re-render all features on every mapFeatures update
   useEffect(() => {
     if (!mapInstanceRef.current) return;
-    if (isSyncingRef.current) return; // Ignore updates that we just synced ourselves
+    if (isSyncingRef.current) return; // Skip updates we generated ourselves during user drawing
 
     const source = vectorSourceRef.current;
-    source.clear(); // Clear old features on new chat actions? Or keep them? Let's keep them and just re-add all.
-    // Actually, it's better to clear and draw all current mapFeatures
+    const prevCount = previousMapFeaturesRef.current.length;
+    const nextCount = mapFeatures.length;
+    previousMapFeaturesRef.current = mapFeatures;
+
+    // Clear source — source of truth is the store
+    source.clear();
 
     if (mapFeatures.length === 0) return;
 
     const geojsonFormat = new GeoJSON();
+    const allOlFeatures: any[] = [];
 
-    mapFeatures.forEach((featureObj) => {
+    for (const featureObj of mapFeatures) {
+      if (!featureObj || typeof featureObj !== "object") {
+        console.warn("Invalid GeoJSON object in mapFeatures:", featureObj);
+        continue;
+      }
+
       try {
-        const features = geojsonFormat.readFeatures(featureObj, {
+        // Normalize anything into a FeatureCollection before handing to OpenLayers
+        // OpenLayers readFeatures crashes on raw geometry objects or malformed data
+        let normalized: any = featureObj;
+
+        const RAW_GEOMETRY_TYPES = ["Point","MultiPoint","LineString","MultiLineString","Polygon","MultiPolygon","GeometryCollection"];
+
+        if (!normalized.type) {
+          console.warn("GeoJSON missing type, skipping:", normalized);
+          continue;
+        } else if (RAW_GEOMETRY_TYPES.includes(normalized.type)) {
+          // Wrap bare geometry into a Feature inside a FeatureCollection
+          normalized = { type: "FeatureCollection", features: [{ type: "Feature", geometry: normalized, properties: {} }] };
+        } else if (normalized.type === "Feature") {
+          if (!normalized.geometry) {
+            console.warn("Feature missing geometry, skipping:", normalized);
+            continue;
+          }
+          normalized = { type: "FeatureCollection", features: [normalized] };
+        } else if (normalized.type === "FeatureCollection") {
+          if (!Array.isArray(normalized.features)) {
+            normalized = { ...normalized, features: [] };
+          } else {
+            // Filter out any broken sub-features
+            normalized = {
+              ...normalized,
+              features: normalized.features.filter((f: any) => f && f.type === "Feature" && f.geometry),
+            };
+          }
+        }
+
+        const features = geojsonFormat.readFeatures(normalized, {
           featureProjection: "EPSG:3857",
         });
-        source.addFeatures(features);
+
+        features.forEach((f: any) => {
+          source.addFeature(f);
+          allOlFeatures.push(f);
+        });
       } catch (e) {
-        console.error("Failed to parse GeoJSON feature:", e);
+        console.error("Failed to parse GeoJSON feature:", e, featureObj);
       }
+    }
+
+    // Only auto-fit when new features were added (not on clear/rerender)
+    const addedFeatures = nextCount > prevCount;
+    if (!addedFeatures || allOlFeatures.length === 0) return;
+
+    const lastFeature = allOlFeatures[allOlFeatures.length - 1];
+    const props = lastFeature.getProperties();
+
+    // If the latest feature is a marker with a specific zoom level, fly to it
+    if (props.type === "marker" && props.zoom) {
+      const geometry = lastFeature.getGeometry();
+      if (geometry && geometry.getType() === "Point") {
+        const coords = (geometry as any).getCoordinates();
+        mapInstanceRef.current.getView().animate({
+          center: coords,
+          zoom: props.zoom,
+          duration: 1000,
+        });
+        return;
+      }
+    }
+
+    // Otherwise fit the view to show all newly added features
+    const extent = createEmpty();
+    allOlFeatures.forEach((f) => {
+      const geom = f.getGeometry();
+      if (geom) extend(extent, geom.getExtent());
     });
 
-    // Handle zooming
-    const features = source.getFeatures();
-    if (features.length > 0) {
-      const lastFeature = features[features.length - 1];
-      const props = lastFeature.getProperties();
-      
-      // If the latest feature is a marker with a specific zoom, zoom to it directly
-      if (props.type === "marker" && props.zoom) {
-        const geometry = lastFeature.getGeometry();
-        if (geometry && geometry.getType() === 'Point') {
-           const coords = (geometry as any).getCoordinates();
-           mapInstanceRef.current.getView().animate({
-             center: coords,
-             zoom: props.zoom,
-             duration: 1000,
-           });
-           return;
-        }
-      }
-
-      // Otherwise, fit map to show all features
-      const extent = source.getExtent();
-      if (extent) {
-        mapInstanceRef.current.getView().fit(extent, {
-          padding: [100, 100, 100, 100],
-          duration: 1000,
-          maxZoom: 16, // Don't zoom in too close for single points
-        });
-      }
+    if (extent && extent[0] !== Infinity) {
+      mapInstanceRef.current.getView().fit(extent, {
+        padding: [100, 100, 100, 100],
+        duration: 1000,
+        maxZoom: 16,
+      });
     }
   }, [mapFeatures]);
 
@@ -286,8 +348,6 @@ export const OpenLayersMap = () => {
         map.removeInteraction(interaction);
       }
     });
-
-    if (!interactionMode) return;
 
     let interaction: any = null;
     let hoverInteraction: Select | null = null;
@@ -353,6 +413,68 @@ export const OpenLayersMap = () => {
           if (hoverInteraction) hoverInteraction.getFeatures().clear();
           syncFeaturesToStore();
           // DO NOT setInteractionMode(null) here, so user can keep deleting
+        }
+      });
+    } else {
+      // Default Mode: Yellow Hover for all features with animated scale up
+      let hoverStartTime = 0;
+      const animDuration = 150; // ms
+      let animatedFeature: Feature | null = null;
+
+      const animate = () => {
+         if (!animatedFeature) return;
+         const elapsed = Date.now() - hoverStartTime;
+         if (elapsed <= animDuration) {
+            animatedFeature.changed();
+            requestAnimationFrame(animate);
+         } else {
+            animatedFeature.changed();
+         }
+      };
+
+      hoverInteraction = new Select({
+        condition: pointerMove,
+        style: (feature) => {
+          let progress = 1;
+          if (feature === animatedFeature) {
+             const elapsed = Date.now() - hoverStartTime;
+             progress = Math.min(elapsed / animDuration, 1);
+          }
+          const ease = 1 - (1 - progress) * (1 - progress); // easeOutQuad
+          
+          const currentRadius = 6 + (10 - 6) * ease;
+          const currentWidth = 3 + (5 - 3) * ease;
+
+          const geomType = feature.getGeometry()?.getType();
+          if (geomType === "LineString" || geomType === "MultiLineString") {
+            return new Style({ 
+              stroke: new Stroke({ color: "#eab308", width: currentWidth }),
+              zIndex: 9999
+            });
+          }
+          
+          return new Style({
+            stroke: new Stroke({ color: "#eab308", width: currentWidth }),
+            fill: new Fill({ color: "rgba(234, 179, 8, 0.4)" }),
+            image: new CircleStyle({ 
+              radius: currentRadius, 
+              fill: new Fill({ color: "#eab308" }), 
+              stroke: new Stroke({ color: "white", width: 2 }) 
+            }),
+            zIndex: 9999
+          });
+        },
+      });
+
+      hoverInteraction.on('select', (e) => {
+        if (e.selected.length > 0) {
+           hoverStartTime = Date.now();
+           animatedFeature = e.selected[0] as Feature;
+           requestAnimationFrame(animate);
+        } else if (e.deselected.length > 0) {
+           const oldFeature = e.deselected[0] as Feature;
+           animatedFeature = null;
+           oldFeature.changed(); // snap back to normal
         }
       });
     }
@@ -422,7 +544,7 @@ export const OpenLayersMap = () => {
       {/* Hover Tooltip */}
       {hoverInfo && (
         <div
-          className="fixed z-50 pointer-events-none px-3 py-2 bg-background/95 backdrop-blur-sm border border-border rounded-md shadow-lg text-xs font-medium animate-in fade-in zoom-in-95 duration-100 min-w-[200px] max-w-[300px] max-h-[300px] overflow-hidden flex flex-col gap-1"
+          className="fixed z-50 pointer-events-none px-3 py-2 bg-background/95 backdrop-blur-sm border border-border rounded-md shadow-lg text-xs font-medium animate-in fade-in zoom-in-95 duration-100 min-w-[200px] max-w-[300px] max-h-[300px] overflow-y-auto flex flex-col gap-1 scrollbar-thin scrollbar-thumb-muted-foreground/20"
           style={{
             left: hoverInfo.x + 15,
             top: hoverInfo.y + 15,
@@ -430,22 +552,36 @@ export const OpenLayersMap = () => {
         >
           {(() => {
             const p = hoverInfo.props || {};
-            const title = p.name || p.instruction || p.title || "Map Location";
-            const subtitle = p.full_address || p.place_formatted || "";
+            const title = p.name || p.instruction || p.title || p.Name || "Map Feature";
+            const subtitle = p.full_address || p.place_formatted || p.Address || "";
             const category = p.poi_category
               ? (Array.isArray(p.poi_category) ? p.poi_category.join(", ") : p.poi_category)
               : p.feature_type;
             const distance = p.distance ? `${(p.distance / 1000).toFixed(2)} km` : null;
 
+            const skipKeys = ['name', 'instruction', 'title', 'Name', 'full_address', 'place_formatted', 'Address', 'poi_category', 'feature_type', 'distance', 'geometry', 'id', 'mapbox_id'];
+            const extraProps = Object.entries(p).filter(([k, v]) => !skipKeys.includes(k) && typeof v !== 'object' && v !== null && v !== '');
+
             return (
               <div className="flex flex-col gap-1.5">
-                <div className="font-semibold text-[13px] leading-tight">{title}</div>
+                <div className="font-semibold text-[13px] leading-tight text-primary">{title}</div>
                 {subtitle && <div className="text-muted-foreground text-[10px] leading-tight">{subtitle}</div>}
 
                 {(category || distance) && (
                   <div className="flex items-center flex-wrap gap-1.5 mt-1 pt-1.5 border-t border-border/50">
                     {category && <span className="text-[9px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded capitalize">{category}</span>}
                     {distance && <span className="text-[9px] font-medium bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded">Dist: {distance}</span>}
+                  </div>
+                )}
+
+                {extraProps.length > 0 && (
+                  <div className="mt-1 pt-1.5 border-t border-border/50 flex flex-col gap-1">
+                    {extraProps.map(([k, v]) => (
+                      <div key={k} className="flex justify-between gap-3 text-[10px]">
+                        <span className="text-muted-foreground capitalize shrink-0">{k.replace(/_/g, ' ')}:</span>
+                        <span className="text-foreground text-right truncate" title={String(v)}>{String(v)}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
