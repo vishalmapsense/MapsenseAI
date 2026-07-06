@@ -28,10 +28,25 @@ function mapTypeToGemini(type?: string): SchemaType {
 function convertJsonSchemaToGeminiSchema(jsonSchema: any): any {
   if (!jsonSchema) return { type: SchemaType.OBJECT, properties: {} };
 
+  let description = jsonSchema.description || "";
+  
+  // Gemini's SDK doesn't natively support min/max/default, so we inject them into the description
+  const extras: string[] = [];
+  if (jsonSchema.default !== undefined) extras.push(`Default: ${JSON.stringify(jsonSchema.default)}`);
+  if (jsonSchema.minimum !== undefined) extras.push(`Min: ${jsonSchema.minimum}`);
+  if (jsonSchema.maximum !== undefined) extras.push(`Max: ${jsonSchema.maximum}`);
+  
+  if (extras.length > 0) {
+    description = description ? `${description} (${extras.join(", ")})` : `(${extras.join(", ")})`;
+  }
+
   const schema: any = {
     type: mapTypeToGemini(jsonSchema.type),
-    description: jsonSchema.description,
   };
+  
+  if (description) {
+    schema.description = description;
+  }
 
   if (schema.type === SchemaType.OBJECT) {
     schema.properties = {};

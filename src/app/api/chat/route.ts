@@ -348,10 +348,24 @@ export async function POST(req: NextRequest) {
 
             // ── MCP Tool Path ─────────────────────────────────────
             try {
+              console.log(`\n========================================`);
+              console.log(`[MCP Tool Request] Sending to MCP...`);
+              console.log(`Tool Name: ${call.name}`);
+              console.log(`Arguments:`, JSON.stringify(call.args, null, 2));
+              console.log(`========================================\n`);
+              
               const rawToolResult = await callMCPProcess("tools/call", {
                 name: call.name,
                 arguments: call.args,
               });
+
+              console.log(`\n========================================`);
+              console.log(`[MCP Tool Response] Received from MCP...`);
+              console.log(`Tool Name: ${call.name}`);
+              // Truncate response if it's too long to avoid flooding the console
+              const responseStr = JSON.stringify(rawToolResult, null, 2);
+              console.log(`Response:`, responseStr.length > 5000 ? responseStr.substring(0, 5000) + '...\n(truncated)' : responseStr);
+              console.log(`========================================\n`);
 
               let resourceUri = undefined;
               if (rawToolResult && (rawToolResult as any).content) {

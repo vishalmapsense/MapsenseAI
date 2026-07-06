@@ -1,7 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
-import "highlight.js/styles/github-dark.css";
+import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ChatMessage } from "@/types/mcp.types";
 import { cn } from "@/lib/utils";
 import { User, Map, Bot, Pencil, X, Check } from "lucide-react";
@@ -129,10 +127,8 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                 )
               ) : (
                 <>
-                  <div className="prose prose-sm dark:prose-invert max-w-none prose-p:leading-relaxed prose-pre:p-0 prose-pre:bg-transparent">
-                    <ReactMarkdown rehypePlugins={[rehypeHighlight]}>
-                      {message.content || "*(No text provided)*"}
-                    </ReactMarkdown>
+                  <div className="w-full opacity-100 ">
+                    <MarkdownRenderer content={message.content || "*(No text provided)*"} />
                   </div>
                   {message.executionMessages && (
                     <details className="mt-2 text-[9px] text-muted-foreground opacity-80 border-t border-border/50 pt-2 group">
