@@ -139,7 +139,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         .messages.filter((m) => !m.isLoading)
         .map((m) => ({ role: m.role, content: m.content }));
       
-      const response = await fetch("/api/chat", {
+      const response = await fetch("/api/adk-chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -197,7 +197,31 @@ export const useChatStore = create<ChatState>((set, get) => {
                 ...state,
                 messages: state.messages.map((m) =>
                   m.id === loadingMessage.id
-                    ? { ...m, content: `*${event.message}*` }
+                    ? { ...m, statusMessage: event.message }
+                    : m
+                ),
+              };
+              return { ...newState, ...syncSession(newState) };
+            });
+          } else if (event.type === "stream") {
+            set((state) => {
+              const newState = {
+                ...state,
+                messages: state.messages.map((m) =>
+                  m.id === loadingMessage.id
+                    ? { ...m, content: m.content + event.message }
+                    : m
+                ),
+              };
+              return { ...newState, ...syncSession(newState) };
+            });
+          } else if (event.type === "agent_event") {
+            set((state) => {
+              const newState = {
+                ...state,
+                messages: state.messages.map((m) =>
+                  m.id === loadingMessage.id
+                    ? { ...m, agentEvents: [...(m.agentEvents || []), event.event] }
                     : m
                 ),
               };
@@ -247,6 +271,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         content: content || "*(No response text)*",
         timestamp: Date.now(),
         toolCalls: finalData.toolCalls,
+        agentEvents: get().messages.find(m => m.id === loadingMessage.id)?.agentEvents,
         usage: finalData.usage,
         isLoading: false,
         executionMessages: executionMessages.length > 0 ? executionMessages : undefined,

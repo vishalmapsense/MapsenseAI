@@ -16,6 +16,14 @@ export interface TokenUsage {
   totalTokenCount: number;
 }
 
+export interface AgentEventInfo {
+  agentName: string;
+  type: "tool_call" | "completion";
+  description: string;
+  toolName?: string;
+  tokens?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -23,6 +31,8 @@ export interface ChatMessage {
   timestamp: number;
   toolCalls?: MCPToolCall[];
   isLoading?: boolean;
+  statusMessage?: string;
+  agentEvents?: AgentEventInfo[];
   usage?: TokenUsage;
   executionMessages?: string[];
 }
