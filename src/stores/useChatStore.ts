@@ -144,6 +144,7 @@ export const useChatStore = create<ChatState>((set, get) => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: conversationHistory,
+          sessionId: get().activeSessionId,
           modelId: model.id,
           provider: model.provider,
           apiKey,
@@ -248,12 +249,12 @@ export const useChatStore = create<ChatState>((set, get) => {
 
       toast.success("Received response");
 
-      // All map operations now come exclusively from clientToolCommands (via typed tool calls).
-      // The LLM no longer generates a `commands` array.
+      console.log("💬 [ChatStore] Received finalData from server:", finalData);
 
       let executionMessages: string[] = [];
       // Execute client tool commands directly (zoom, rotate, etc.) and collect validation results
       if (finalData.clientToolCommands && Array.isArray(finalData.clientToolCommands) && finalData.clientToolCommands.length > 0) {
+        console.log("🛠️ [ChatStore] Executing clientToolCommands:", finalData.clientToolCommands);
         const map = useMapStore.getState().mapInstance;
         if (map) {
           const results = await executeClientCommands(map, finalData.clientToolCommands);
@@ -263,12 +264,19 @@ export const useChatStore = create<ChatState>((set, get) => {
         }
       }
 
-      let content = finalData.content?.text || "";
+      // Use finalData text, but fall back to whatever was streamed during processing
+      const streamedContent = get().messages.find(m => m.id === loadingMessage.id)?.content || "";
+      let content = finalData.content?.text || streamedContent || "";
+
+      // If we have map commands but no text, generate a brief summary
+      if (!content.trim() && executionMessages.length > 0) {
+        content = executionMessages.join("\n");
+      }
 
       const assistantMessage: ChatMessage = {
         id: loadingMessage.id,
         role: "assistant",
-        content: content || "*(No response text)*",
+        content: content || "*(Task completed)*",
         timestamp: Date.now(),
         toolCalls: finalData.toolCalls,
         agentEvents: get().messages.find(m => m.id === loadingMessage.id)?.agentEvents,
@@ -383,7 +391,8 @@ export const useChatStore = create<ChatState>((set, get) => {
   },
 
   clearMessages: () => set((state) => {
-    const newState = { ...state, messages: [], error: null };
+    const newSessionId = generateId();
+    const newState = { ...state, activeSessionId: newSessionId, messages: [], error: null };
     return { ...newState, ...syncSession(newState) };
   }),
   clearError: () => set({ error: null }),

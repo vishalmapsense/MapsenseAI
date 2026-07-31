@@ -3,6 +3,7 @@ import { fromLonLat, toLonLat } from "ol/proj";
 import * as turf from "@turf/turf";
 import type { MapCommand } from "@/stores/useMapStore";
 import { useMapStore } from "@/stores/useMapStore";
+import { normalizeToGeoJSON, fetchAndNormalizeSpatialUrl } from "@/utils/spatialNormalizer";
 
 export interface CommandResult {
   success: boolean;
@@ -24,6 +25,7 @@ export const executeClientCommands = async (
 
   for (const cmd of commands) {
     try {
+      console.log("⚙️ [MapExecutor] Executing command:", cmd.type, cmd.payload);
       switch (cmd.type) {
         case "ZOOM_IN": {
           const levels = cmd.payload?.levels || 1;
@@ -140,28 +142,46 @@ export const executeClientCommands = async (
           break;
         }
         case "ADD_GEOJSON": {
-          const geojson = cmd.payload?.geojson;
+          const rawGeojson = cmd.payload?.geojson;
           const label = cmd.payload?.label || "Custom Feature";
-          if (geojson) {
-            // Optional: inject label into properties if it doesn't have one
-            if (geojson.type === "Feature" && !geojson.properties) {
-              geojson.properties = { name: label };
-            } else if (geojson.type === "FeatureCollection" && geojson.features) {
-              geojson.features.forEach((f: any) => {
-                if (!f.properties) f.properties = { name: label };
+          if (rawGeojson) {
+            const normalized = normalizeToGeoJSON(rawGeojson, label);
+            if (normalized) {
+              const store = useMapStore.getState();
+              store.setMapFeatures([...store.mapFeatures, normalized]);
+
+              results.push({
+                success: true,
+                code: "SUCCESS",
+                message: `Added spatial feature '${label}' to the map.`,
               });
+            } else {
+              throw new Error("Could not parse or normalize spatial data.");
             }
-
-            const store = useMapStore.getState();
-            store.setMapFeatures([...store.mapFeatures, geojson]);
-
-            results.push({
-              success: true,
-              code: "SUCCESS",
-              message: `Added custom GeoJSON to the map.`,
-            });
           } else {
             throw new Error("Missing geojson payload.");
+          }
+          break;
+        }
+        case "LOAD_URL": {
+          const url = cmd.payload?.url;
+          const label = cmd.payload?.label || "External Layer";
+          if (typeof url === "string") {
+            const normalized = await fetchAndNormalizeSpatialUrl(url, label);
+            if (normalized) {
+              const store = useMapStore.getState();
+              store.setMapFeatures([...store.mapFeatures, normalized]);
+
+              results.push({
+                success: true,
+                code: "SUCCESS",
+                message: `Loaded spatial feature from URL.`,
+              });
+            } else {
+              throw new Error("Could not fetch or parse spatial data from URL.");
+            }
+          } else {
+            throw new Error("Missing URL payload.");
           }
           break;
         }

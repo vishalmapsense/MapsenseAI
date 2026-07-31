@@ -47,8 +47,6 @@ export const OpenLayersMap = () => {
   const mapInstanceRef = useRef<Map | null>(null);
   const vectorSourceRef = useRef<VectorSource>(new VectorSource());
   const tileLayerRef = useRef<TileLayer<OSM | XYZ>>(new TileLayer({ source: new OSM() }));
-  const [hoverInfo, setHoverInfo] = useState<{ props: Record<string, any>; x: number; y: number } | null>(null);
-
   const { 
     mapFeatures, 
     baseMap, 
@@ -57,7 +55,9 @@ export const OpenLayersMap = () => {
     setMapInstance,
     interactionMode,
     setInteractionMode,
-    setMapFeatures
+    setMapFeatures,
+    hoverInfo,
+    setHoverInfo
   } = useMapStore();
 
   const interactionModeRef = useRef<string | null>(null);
@@ -108,13 +108,47 @@ export const OpenLayersMap = () => {
     }
   }, [baseMap]);
 
+  // Force a redraw of features when hoverInfo changes (for double-click highlighting)
+  useEffect(() => {
+    if (vectorSourceRef.current) {
+      vectorSourceRef.current.changed();
+    }
+  }, [hoverInfo]);
+
   useEffect(() => {
     if (!mapRef.current || mapInstanceRef.current) return;
 
     // Per-feature style function — distinguish LineString to prevent unwanted fills
     const featureStyleFn = (feature: any) => {
       const geomType = feature.getGeometry()?.getType();
+      const props = feature.getProperties();
       
+      const currentHoverInfo = useMapStore.getState().hoverInfo;
+      const isHighlighted = currentHoverInfo && 
+                            currentHoverInfo.props && 
+                            currentHoverInfo.props._layerIndex !== undefined && 
+                            props._layerIndex === currentHoverInfo.props._layerIndex;
+      
+      // Highlight styles (Yellow like hover)
+      if (isHighlighted) {
+        if (geomType === "LineString" || geomType === "MultiLineString") {
+          return new Style({
+            stroke: new Stroke({ color: "#eab308", width: 5 }),
+            zIndex: 9999
+          });
+        }
+        return new Style({
+          stroke: new Stroke({ color: "#eab308", width: 5 }),
+          fill: new Fill({ color: "rgba(234, 179, 8, 0.4)" }),
+          image: new CircleStyle({
+            radius: 8,
+            fill: new Fill({ color: "#eab308" }),
+            stroke: new Stroke({ color: "white", width: 2 })
+          }),
+          zIndex: 9999
+        });
+      }
+
       // Default styles for points and polygons
       const defaultStroke = new Stroke({ color: "#3b82f6", width: 3 });
       const defaultFill = new Fill({ color: "rgba(59, 130, 246, 0.2)" });
@@ -235,6 +269,8 @@ export const OpenLayersMap = () => {
     if (!mapInstanceRef.current) return;
     if (isSyncingRef.current) return; // Skip updates we generated ourselves during user drawing
 
+    console.log("🗺️ [OpenLayersMap] Rendering mapFeatures update. Count:", mapFeatures.length, mapFeatures);
+
     const source = vectorSourceRef.current;
     const prevCount = previousMapFeaturesRef.current.length;
     const nextCount = mapFeatures.length;
@@ -248,7 +284,9 @@ export const OpenLayersMap = () => {
     const geojsonFormat = new GeoJSON();
     const allOlFeatures: any[] = [];
 
+    let layerIndex = -1;
     for (const featureObj of mapFeatures) {
+      layerIndex++;
       if (!featureObj || typeof featureObj !== "object") {
         console.warn("Invalid GeoJSON object in mapFeatures:", featureObj);
         continue;
@@ -290,6 +328,8 @@ export const OpenLayersMap = () => {
         });
 
         features.forEach((f: any) => {
+          const props = f.getProperties();
+          f.setProperties({ ...props, _layerIndex: layerIndex });
           source.addFeature(f);
           allOlFeatures.push(f);
         });

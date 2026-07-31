@@ -166,6 +166,8 @@ interface MarkdownRendererProps {
 }
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
+  const formattedContent = content.replace(/\[OPTION:\s*([^\]]+)\]/gi, "• **$1**");
+
   return (
     <div className="markdown-body max-w-none">
       <ReactMarkdown
@@ -173,7 +175,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
         rehypePlugins={[rehypeHighlight]}
         components={components}
       >
-        {content}
+        {formattedContent}
       </ReactMarkdown>
     </div>
   );

@@ -46,6 +46,7 @@ interface MapState {
   mapViewState: MapViewState | null; // Track current map viewport state
   mapInstance: Map | null;
   interactionMode: string | null; // e.g. 'draw_polygon', 'edit', 'delete', null
+  hoverInfo: { props: Record<string, any>; x: number; y: number } | null;
 
   clearFeatures: () => void;
   setMapFeatures: (features: any[]) => void;
@@ -53,6 +54,7 @@ interface MapState {
   setMapViewState: (state: MapViewState) => void;
   setMapInstance: (map: Map | null) => void;
   setInteractionMode: (mode: string | null) => void;
+  setHoverInfo: (info: { props: Record<string, any>; x: number; y: number } | null) => void;
 }
 
 export const useMapStore = create<MapState>((set) => ({
@@ -61,6 +63,7 @@ export const useMapStore = create<MapState>((set) => ({
   mapViewState: null,
   mapInstance: null,
   interactionMode: null,
+  hoverInfo: null,
 
   clearFeatures: () => set({ mapFeatures: [] }),
   setMapFeatures: (features) => set({ mapFeatures: features }),
@@ -68,4 +71,5 @@ export const useMapStore = create<MapState>((set) => ({
   setMapViewState: (mapViewState) => set({ mapViewState }),
   setMapInstance: (mapInstance) => set({ mapInstance }),
   setInteractionMode: (interactionMode) => set({ interactionMode }),
+  setHoverInfo: (hoverInfo) => set({ hoverInfo }),
 }));

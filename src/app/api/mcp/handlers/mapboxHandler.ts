@@ -50,6 +50,7 @@ async function getMcpClient(): Promise<Client> {
     args: [scriptPath],
     env: {
       ...process.env,
+      CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
       MAPBOX_ACCESS_TOKEN: accessToken,
     },
   });

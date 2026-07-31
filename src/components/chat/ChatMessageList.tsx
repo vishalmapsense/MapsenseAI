@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ChatMessage } from "@/types/mcp.types";
 import { cn } from "@/lib/utils";
-import { User, Map, Bot, Pencil, X, Check, Loader2, CheckCircle2, Zap } from "lucide-react";
+import { User, Map, Bot, Pencil, X, Check, Loader2, CheckCircle2, Zap, Sparkles } from "lucide-react";
 import { useChatStore } from "@/stores/useChatStore";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AgentEventInfo } from "@/types/mcp.types";
@@ -11,6 +11,37 @@ interface ChatMessageListProps {
   messages: ChatMessage[];
   aiName: string;
 }
+
+const extractOptionButtons = (text: string): string[] => {
+  if (!text) return [];
+  const options: string[] = [];
+
+  // 1. Explicit [OPTION: label] pattern
+  const optionRegex = /\[OPTION:\s*([^\]]+)\]/gi;
+  let match;
+  while ((match = optionRegex.exec(text)) !== null) {
+    const optText = match[1]?.trim();
+    if (optText && !options.includes(optText)) {
+      options.push(optText);
+    }
+  }
+
+  // 2. Fallback: Bulleted options if text asks a clarifying choice/question
+  if (options.length === 0 && /(choose|select|which|confirm|options|did you mean)/i.test(text)) {
+    const lines = text.split("\n");
+    for (const line of lines) {
+      const bulletMatch = line.match(/^[\s*-·•\d+.]+\s*(?:\[|\()?([^\]\)\n]{2,60})(?:\]|\))?$/);
+      if (bulletMatch && bulletMatch[1]) {
+        const cleaned = bulletMatch[1].replace(/^\*\*|\*\*$/g, "").trim();
+        if (cleaned && !cleaned.toLowerCase().startsWith("http") && !options.includes(cleaned)) {
+          options.push(cleaned);
+        }
+      }
+    }
+  }
+
+  return options.slice(0, 6);
+};
 
 const renderAgentEvents = (events: AgentEventInfo[] | undefined, isLoading: boolean = false) => {
   if (!events || events.length === 0) return null;
@@ -88,7 +119,7 @@ const renderAgentEvents = (events: AgentEventInfo[] | undefined, isLoading: bool
 
 export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiName }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const { editAndResendMessage } = useChatStore();
+  const { editAndResendMessage, sendMessage, isLoading: isChatLoading } = useChatStore();
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
@@ -112,6 +143,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
     <div ref={scrollRef} className="flex flex-col gap-4 p-4 overflow-y-auto h-full scroll-smooth">
       {messages.map((message) => {
         const isUser = message.role === "user";
+        const options = !isUser ? extractOptionButtons(message.content) : [];
 
         return (
           <div
@@ -214,6 +246,24 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                   <div className="w-full opacity-100 ">
                     <MarkdownRenderer content={message.content || "*(No text provided)*"} />
                   </div>
+
+                  {/* Interactive Option / Confirmation Buttons */}
+                  {options.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2.5 pt-2 border-t border-border/40">
+                      {options.map((opt, i) => (
+                        <button
+                          key={i}
+                          disabled={isChatLoading}
+                          onClick={() => sendMessage(opt)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-xl bg-primary/10 text-primary border border-primary/30 hover:bg-primary hover:text-primary-foreground transition-all duration-150 shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                          <Sparkles className="w-3.5 h-3.5 opacity-80" />
+                          <span>{opt}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+
                   {message.executionMessages && (
                     <details className="mt-2 text-[9px] text-muted-foreground opacity-80 border-t border-border/50 pt-2 group">
                       <summary className="font-semibold text-foreground/70 cursor-pointer flex items-center gap-1.5 select-none hover:text-foreground/90 transition-colors list-none [&::-webkit-details-marker]:hidden">
