@@ -1,24 +1,30 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { MessageSquarePlus, Settings, HelpCircle, PanelLeftClose, PanelLeft, MessageSquare, X } from "lucide-react";
+import { MessageSquarePlus, Settings, HelpCircle, PanelLeftClose, PanelLeft, MessageSquare, X, LogIn, LogOut, User, Trash2 } from "lucide-react";
 import { useSidebarStore } from "@/stores/useSidebarStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 import { SidebarItem } from "./SidebarItem";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { useChatStore } from "@/stores/useChatStore";
+import { toast } from "sonner";
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
-  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession } = useChatStore();
+  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession } = useChatStore();
+  const { user, signInWithGoogle, signOut, isLoading: authLoading } = useAuthStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
 
   // Prevent hydration mismatch on initial render with persistent state
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
-  }, []);
+    fetchSessions();
+  }, [fetchSessions]);
 
   if (!mounted) return null;
 
@@ -79,7 +85,7 @@ export const Sidebar = () => {
                       {sessions.map((item) => (
                         <div
                           key={item.id}
-                          onClick={() => setActiveSession(item.id)}
+                          onClick={() => loadSessionHistory(item.id)}
                           className={cn(
                             "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors",
                             item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
@@ -113,7 +119,7 @@ export const Sidebar = () => {
                 Recent Conversations
               </div>
 
-              <div className="flex items-start flex-col gap-0.5 pb-4 w-full">
+              <div className="flex flex-col gap-0.5 pb-4 w-full min-w-0">
                 {sessions.length === 0 && (
                   <div className="text-xs text-muted-foreground/70 px-4 py-2 italic">No chats yet</div>
                 )}
@@ -123,17 +129,79 @@ export const Sidebar = () => {
                     icon={MessageSquare}
                     label={item.title}
                     isActive={item.id === activeSessionId}
+                    onDelete={() => deleteSession(item.id)}
+                    onRename={(newTitle) => renameSession(item.id, newTitle)}
+                    onShare={() => {
+                      if (user) {
+                        const userId = user.email || user.id;
+                        const shareId = btoa(`${userId}|${item.id}`);
+                        const shareUrl = `${window.location.origin}/?shareId=${shareId}`;
+                        navigator.clipboard.writeText(shareUrl);
+                        toast.success("Public share link copied to clipboard!");
+                      } else {
+                        useAuthStore.getState().setAuthModalOpen(true);
+                      }
+                    }}
                     onClick={() => {
-                      setActiveSession(item.id);
-                      setMobileOpen(false); // Close sidebar on mobile
+                      loadSessionHistory(item.id);
+                      setChatOpen(true);
+                      setMobileOpen(false);
                     }}
                   />
                 ))}
+                
+                {sessions.length > 0 && (
+                  <div className="px-3 pt-4 pb-2 w-full">
+                    <button 
+                      onClick={() => {
+                        if (!user) {
+                          useAuthStore.getState().setAuthModalOpen(true);
+                        } else {
+                          setIsDeleteAllModalOpen(true);
+                        }
+                      }}
+                      className="w-full text-xs flex items-center justify-center gap-2 py-1.5 text-destructive/80 hover:text-destructive hover:bg-destructive/10 rounded-md transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Clear All Chats
+                    </button>
+                  </div>
+                )}
               </div>
             </ScrollArea>
           </motion.div>
         )}
       </AnimatePresence>
+
+      <div className="mt-auto border-t border-sidebar-border/50 p-3 flex flex-col gap-1">
+        {authLoading ? (
+          <div className="text-xs text-muted-foreground italic px-2">Loading auth...</div>
+        ) : user ? (
+          <>
+            <div 
+              onClick={() => setSettingsOpen(true)}
+              className="px-2 py-2 flex items-center gap-2 overflow-hidden hover:bg-sidebar-accent/50 rounded-md cursor-pointer transition-colors"
+            >
+              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary font-medium text-xs flex-shrink-0 overflow-hidden">
+                {user.user_metadata?.avatar_url ? (
+                  <img src={user.user_metadata.avatar_url} alt="Profile" className="w-full h-full object-cover" />
+                ) : (
+                  (user.user_metadata?.full_name || user.email || 'U').charAt(0).toUpperCase()
+                )}
+              </div>
+              {!isCollapsed && (
+                <div className="flex flex-col truncate flex-1">
+                  <span className="text-sm font-medium text-sidebar-foreground truncate">
+                    {user.user_metadata?.full_name || 'User'}
+                  </span>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <SidebarItem icon={LogIn} label="Sign In with Google" onClick={signInWithGoogle} />
+        )}
+      </div>
     </>
   );
 
@@ -169,7 +237,55 @@ export const Sidebar = () => {
 
       {/* Settings Modal */}
       <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+
+      {/* Delete All Chats Confirmation Modal */}
+      {isDeleteAllModalOpen && typeof document !== "undefined" && createPortal(
+        <div 
+          className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/40 backdrop-blur-[2px] p-4 animate-in fade-in-50"
+          onClick={() => setIsDeleteAllModalOpen(false)}
+        >
+          <div 
+            className="bg-popover border border-border/80 rounded-xl shadow-2xl w-full max-w-sm p-5 flex flex-col gap-4 text-popover-foreground"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border/50 pb-2">
+              <h3 className="text-sm font-semibold text-destructive flex items-center gap-2">
+                <Trash2 className="w-4 h-4" />
+                Clear All Chats
+              </h3>
+              <button 
+                onClick={() => setIsDeleteAllModalOpen(false)} 
+                className="text-muted-foreground hover:text-foreground p-1 rounded hover:bg-accent"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              Are you sure you want to delete all chat conversations? This action cannot be undone and will permanently erase your chat history.
+            </p>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                onClick={() => setIsDeleteAllModalOpen(false)}
+                className="px-3.5 py-1.5 text-xs text-muted-foreground hover:bg-accent rounded-md transition-colors font-medium"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setIsDeleteAllModalOpen(false);
+                  deleteAllSessions();
+                }}
+                className="px-3.5 py-1.5 text-xs font-medium bg-destructive text-destructive-foreground hover:bg-destructive/90 rounded-md transition-colors shadow-sm"
+              >
+                Delete All
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </>
   );
 };
-

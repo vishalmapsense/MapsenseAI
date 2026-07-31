@@ -1,5 +1,4 @@
-import type { ClientToolDefinition } from "./types";
-
+import type { ClientToolDefinition } from "@/config/clientTools/types";
 export const DRAWING_TOOLS: ClientToolDefinition[] = [
   // Markers
   {

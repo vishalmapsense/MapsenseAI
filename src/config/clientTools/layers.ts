@@ -8,8 +8,7 @@
  * Conversion to Gemini/OpenAI format happens at runtime.
  * ─────────────────────────────────────────────────────────────
  */
-
-import type { ClientToolDefinition } from "./types";
+import type { ClientToolDefinition } from "@/config/clientTools/types";
 
 export const LAYER_TOOLS: ClientToolDefinition[] = [
   {

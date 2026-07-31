@@ -8,6 +8,7 @@
 
 import { create } from "zustand";
 import { useModelSettingsStore } from "./useModelSettingsStore";
+import { useAuthStore } from "./useAuthStore";
 import { ChatMessage } from "@/types/mcp.types";
 import { toast } from "sonner";
 import { useMapStore } from "./useMapStore";
@@ -41,6 +42,12 @@ interface ChatState {
   toggleTransparentMode: () => void;
   setActiveSession: (id: string) => void;
   createNewSession: () => void;
+  fetchSessions: () => Promise<void>;
+  loadSessionHistory: (sessionId: string) => Promise<void>;
+  loadSharedSession: (shareId: string) => Promise<void>;
+  deleteSession: (sessionId: string) => Promise<void>;
+  deleteAllSessions: () => Promise<void>;
+  renameSession: (sessionId: string, newTitle: string) => void;
   initUserLocation: () => Promise<void>;
 }
 
@@ -61,7 +68,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       updatedAt: Date.now(),
       // update title if it's "New Chat" and we just got the first user message
       title: (newSessions[sessionIndex].title === "New Chat" && state.messages.length > 0)
-        ? state.messages[0].content.slice(0, 30) + (state.messages[0].content.length > 30 ? "..." : "")
+        ? "Generating title..."
         : newSessions[sessionIndex].title,
     };
     return { sessions: newSessions };
@@ -79,6 +86,12 @@ export const useChatStore = create<ChatState>((set, get) => {
   userLocation: null,
 
   sendMessage: async (text: string) => {
+    const auth = useAuthStore.getState();
+    if (!auth.user) {
+      auth.setAuthModalOpen(true);
+      return;
+    }
+
     const currentState = get();
     if (!text.trim() || currentState.isLoading) return;
 
@@ -286,8 +299,15 @@ export const useChatStore = create<ChatState>((set, get) => {
       };
 
       set((state) => {
+        const updatedSessions = finalData.title
+          ? state.sessions.map((s) =>
+              s.id === state.activeSessionId ? { ...s, title: finalData.title } : s
+            )
+          : state.sessions;
+
         const newState = {
           ...state,
+          sessions: updatedSessions,
           messages: state.messages.map((m) =>
             m.id === loadingMessage.id ? assistantMessage : m
           ),
@@ -406,22 +426,208 @@ export const useChatStore = create<ChatState>((set, get) => {
     return { activeSessionId: id, messages: session.messages, error: null, isChatOpen: true, isChatMinimized: false };
   }),
   
-  createNewSession: () => set((state) => {
-    const newSession: ChatSession = {
-      id: generateId(),
-      title: "New Chat",
-      messages: [],
-      updatedAt: Date.now()
-    };
-    return {
-      sessions: [newSession, ...state.sessions],
-      activeSessionId: newSession.id,
-      messages: [],
-      error: null,
-      isChatOpen: true,
-      isChatMinimized: false
-    };
-  }),
+  createNewSession: () => {
+    const auth = useAuthStore.getState();
+    if (!auth.user) {
+      auth.setAuthModalOpen(true);
+      return;
+    }
+
+    set((state) => {
+      const newSession: ChatSession = {
+        id: generateId(),
+        title: "New Chat",
+        messages: [],
+        updatedAt: Date.now()
+      };
+      return {
+        sessions: [newSession, ...state.sessions],
+        activeSessionId: newSession.id,
+        messages: [],
+        error: null,
+        isChatOpen: true,
+        isChatMinimized: false
+      };
+    });
+  },
+
+  fetchSessions: async () => {
+    try {
+      const res = await fetch("/api/adk-chat/sessions");
+      const data = await res.json();
+      if (data.sessions && Array.isArray(data.sessions)) {
+        set((state) => {
+          const mergedSessions: ChatSession[] = data.sessions.map((s: any) => {
+            const existing = state.sessions.find((es) => es.id === s.id);
+            return {
+              id: s.id,
+              title: s.title || `Chat ${s.id.slice(-6)}`,
+              messages: existing ? existing.messages : [],
+              updatedAt: s.updatedAt || Date.now(),
+            };
+          });
+          return { sessions: mergedSessions };
+        });
+        
+        // Auto-load latest session if no active session is set
+        const { activeSessionId, loadSessionHistory } = get();
+        if (!activeSessionId && data.sessions.length > 0) {
+          await loadSessionHistory(data.sessions[0].id);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to fetch ADK sessions:", e);
+    }
+  },
+
+  loadSessionHistory: async (sessionId: string) => {
+    set({ isLoading: true, activeSessionId: sessionId });
+    try {
+      const res = await fetch(`/api/adk-chat/sessions/${sessionId}`);
+      const data = await res.json();
+      if (data.messages) {
+        set((state) => {
+          const updatedSessions = state.sessions.map((s) =>
+            s.id === sessionId ? { ...s, messages: data.messages } : s
+          );
+          return {
+            activeSessionId: sessionId,
+            messages: data.messages,
+            sessions: updatedSessions,
+            isLoading: false,
+            isChatOpen: true,
+            isChatMinimized: false,
+          };
+        });
+      } else {
+        set({ isLoading: false });
+      }
+    } catch (e) {
+      console.error("Failed to load ADK session history:", e);
+      set({ isLoading: false });
+    }
+  },
+
+  loadSharedSession: async (shareId: string) => {
+    set({ isLoading: true });
+    try {
+      const res = await fetch(`/api/adk-chat/share/${shareId}`);
+      const data = await res.json();
+      if (data.messages) {
+        set((state) => {
+          // Check if session already exists, if not, add it as a temporary session
+          const decoded = atob(shareId);
+          const sessionId = decoded.split("|")[1] || `shared-${shareId}`;
+          const existingSession = state.sessions.find(s => s.id === sessionId);
+          
+          let updatedSessions = state.sessions;
+          if (!existingSession) {
+            updatedSessions = [
+              {
+                id: sessionId,
+                title: data.title || "Shared Chat",
+                messages: data.messages,
+                updatedAt: data.updatedAt || Date.now(),
+              },
+              ...state.sessions
+            ];
+          } else {
+            updatedSessions = state.sessions.map((s) =>
+              s.id === sessionId ? { ...s, messages: data.messages } : s
+            );
+          }
+
+          return {
+            activeSessionId: sessionId,
+            messages: data.messages,
+            sessions: updatedSessions,
+            isLoading: false,
+            isChatOpen: true,
+            isChatMinimized: false,
+          };
+        });
+      } else {
+        set({ isLoading: false });
+      }
+    } catch (e) {
+      console.error("Failed to load shared session:", e);
+      set({ isLoading: false });
+    }
+  },
+
+  deleteSession: async (sessionId: string) => {
+    const auth = useAuthStore.getState();
+    if (!auth.user) {
+      auth.setAuthModalOpen(true);
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/adk-chat/sessions/${sessionId}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error("Failed to delete session");
+      
+      set((state) => {
+        const filtered = state.sessions.filter(s => s.id !== sessionId);
+        const activeSessionId = state.activeSessionId === sessionId 
+          ? (filtered.length > 0 ? filtered[0].id : null)
+          : state.activeSessionId;
+          
+        return {
+          sessions: filtered,
+          activeSessionId,
+          messages: activeSessionId === state.activeSessionId ? state.messages : [],
+        };
+      });
+      
+      // Auto load the new active session if it changed
+      const currentActiveId = get().activeSessionId;
+      if (currentActiveId && currentActiveId !== sessionId) {
+        get().loadSessionHistory(currentActiveId);
+      } else if (!currentActiveId) {
+        get().createNewSession();
+      }
+    } catch (err: any) {
+      console.error("Delete session error:", err);
+    }
+  },
+
+  deleteAllSessions: async () => {
+    const auth = useAuthStore.getState();
+    if (!auth.user) {
+      auth.setAuthModalOpen(true);
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/adk-chat/sessions/all`, { method: 'DELETE' });
+      if (!res.ok) throw new Error("Failed to delete all sessions");
+      
+      set({ sessions: [], activeSessionId: null, messages: [] });
+      get().createNewSession();
+    } catch (err: any) {
+      console.error("Delete all sessions error:", err);
+    }
+  },
+
+  renameSession: async (sessionId: string, newTitle: string) => {
+    // 1. Optimistic UI update
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, title: newTitle } : s
+      ),
+    }));
+
+    // 2. Persist in database
+    try {
+      await fetch(`/api/adk-chat/sessions/${sessionId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      });
+    } catch (err) {
+      console.error("Failed to persist session rename:", err);
+    }
+  },
 
   initUserLocation: async () => {
     if (get().userLocation) return;
@@ -446,6 +652,6 @@ export const useChatStore = create<ChatState>((set, get) => {
         console.warn("Geolocation error:", error);
       }
     }
-  },
-};
+  }
+  };
 });

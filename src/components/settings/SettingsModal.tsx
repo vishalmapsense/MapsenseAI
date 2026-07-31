@@ -16,9 +16,9 @@ import {
   Palette,
   Settings,
   User,
-  Moon,
   Sun,
   Layout,
+  LogOut,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
@@ -29,6 +29,7 @@ import {
   type ModelProvider,
 } from "@/stores/useModelSettingsStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
+import { useAuthStore } from "@/stores/useAuthStore";
 
 // ─── Provider Icons ───────────────────────────────────────────
 
@@ -269,7 +270,10 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [filter, setFilter] = useState<"all" | "free" | "paid">("all");
   const { selectedModelId, setSelectedModel } = useModelSettingsStore();
   const { layout, setLayout } = useSidebarStore();
-  const { theme, setTheme } = useTheme();
+  const { user, signOut } = useAuthStore();
+
+  // Prevent hydration mismatch
+  const [mounted, setMounted] = useState(false);
 
   const filteredModels = ALL_MODELS.filter((m) => {
     if (filter === "free") return m.isFree;
@@ -314,17 +318,25 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
             className="fixed inset-0 z-[101] flex items-center justify-center p-4 pointer-events-none"
           >
             <div
-              className="pointer-events-auto w-full max-w-4xl h-[85vh] flex bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800/80 rounded-2xl shadow-xl dark:shadow-2xl overflow-hidden"
+              className="pointer-events-auto w-full max-w-4xl h-[85vh] flex flex-col md:flex-row bg-white dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800/80 rounded-2xl shadow-xl dark:shadow-2xl overflow-hidden relative"
               onClick={(e) => e.stopPropagation()}
             >
+              {/* Close button for mobile - absolute positioned */}
+              <button
+                onClick={onClose}
+                className="md:hidden absolute top-3 right-3 z-50 p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-300 dark:hover:bg-zinc-800/60 transition-all bg-white/80 dark:bg-zinc-950/80 backdrop-blur-sm"
+              >
+                <X className="w-5 h-5" />
+              </button>
+
               {/* Left Sidebar */}
-              <div className="w-56 bg-zinc-50 dark:bg-zinc-900/40 border-r border-zinc-200 dark:border-zinc-800/60 flex flex-col">
-                <div className="p-5 pb-2">
+              <div className="w-full md:w-56 shrink-0 bg-zinc-50 dark:bg-zinc-900/40 border-b md:border-b-0 md:border-r border-zinc-200 dark:border-zinc-800/60 flex flex-col pt-3 md:pt-0">
+                <div className="hidden md:block p-5 pb-2">
                   <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
                     Settings
                   </h2>
                 </div>
-                <div className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+                <div className="flex flex-row md:flex-col flex-1 px-3 py-2 md:py-4 gap-2 md:space-y-1 overflow-x-auto md:overflow-y-auto scrollbar-none snap-x pr-12 md:pr-3">
                   {MENU_ITEMS.map((item) => {
                     const Icon = item.icon;
                     const isActive = tab === item.id;
@@ -332,14 +344,14 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       <button
                         key={item.id}
                         onClick={() => setTab(item.id)}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+                        className={`shrink-0 md:w-full flex items-center gap-2 md:gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all snap-start ${
                           isActive
                             ? "bg-blue-500 text-white shadow-sm shadow-blue-500/20"
                             : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/60 hover:text-zinc-900 dark:hover:text-zinc-200"
                         }`}
                       >
                         <Icon className="w-4 h-4" />
-                        {item.label}
+                        <span className="whitespace-nowrap">{item.label}</span>
                       </button>
                     );
                   })}
@@ -347,9 +359,9 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
               </div>
 
               {/* Main Content Area */}
-              <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-zinc-950">
+              <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-zinc-950 overflow-hidden relative">
                 {/* Header Actions */}
-                <div className="flex items-center justify-end px-8 py-4">
+                <div className="hidden md:flex items-center justify-end px-8 py-4">
                   <button
                     onClick={onClose}
                     className="p-1.5 rounded-lg text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100 dark:text-zinc-500 dark:hover:text-zinc-300 dark:hover:bg-zinc-800/60 transition-all"
@@ -359,7 +371,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                 </div>
 
                 {/* Scrollable Content */}
-                <div className="flex-1 overflow-y-auto px-8 pb-8">
+                <div className="flex-1 overflow-y-auto px-4 md:px-8 py-6 md:py-0 md:pb-8">
                   <AnimatePresence mode="wait">
                     
                     {/* ── Models Tab ── */}
@@ -611,8 +623,51 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                       </motion.div>
                     )}
 
-                    {/* ── General / Account Placeholders ── */}
-                    {["general", "account"].includes(tab) && (
+                    {/* ── Account ── */}
+                    {tab === "account" && (
+                      <motion.div
+                        key="account"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.15 }}
+                        className="flex flex-col gap-4"
+                      >
+                        <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 flex items-center justify-between gap-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-semibold text-sm shrink-0 overflow-hidden shadow-sm">
+                              {user?.user_metadata?.avatar_url ? (
+                                <img src={user.user_metadata.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+                              ) : (
+                                (user?.email || "U").charAt(0).toUpperCase()
+                              )}
+                            </div>
+                            <div className="flex flex-col">
+                              <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                                {user?.user_metadata?.full_name || user?.email?.split('@')[0] || "User"}
+                              </span>
+                              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                                {user?.email || "No email available"}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          <button
+                            onClick={() => {
+                              signOut();
+                              onClose();
+                            }}
+                            className="flex items-center gap-1.5 px-3 py-1.5 bg-red-50 hover:bg-red-100 dark:bg-red-500/10 dark:hover:bg-red-500/20 text-red-600 dark:text-red-400 text-xs font-medium rounded-md transition-colors border border-red-200 dark:border-red-900/50"
+                          >
+                            <LogOut className="w-3.5 h-3.5" />
+                            Sign Out
+                          </button>
+                        </div>
+                      </motion.div>
+                    )}
+
+                    {/* ── General Placeholder ── */}
+                    {tab === "general" && (
                       <motion.div
                         key="placeholder"
                         initial={{ opacity: 0, y: 4 }}
@@ -622,15 +677,13 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                         className="flex flex-col items-center justify-center h-64 text-center"
                       >
                         <div className="w-16 h-16 rounded-2xl bg-zinc-100 dark:bg-zinc-900 flex items-center justify-center text-zinc-400 dark:text-zinc-600 mb-4">
-                          {tab === "theme" && <Palette className="w-8 h-8" />}
-                          {tab === "general" && <Settings className="w-8 h-8" />}
-                          {tab === "account" && <User className="w-8 h-8" />}
+                          <Settings className="w-8 h-8" />
                         </div>
                         <h3 className="text-lg font-semibold text-zinc-900 dark:text-zinc-200 capitalize">
-                          {tab} Settings
+                          General Settings
                         </h3>
                         <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2 max-w-sm">
-                          This section is coming soon. You'll be able to configure {tab} preferences here.
+                          This section is coming soon. You'll be able to configure general preferences here.
                         </p>
                       </motion.div>
                     )}

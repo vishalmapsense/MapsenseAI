@@ -77,10 +77,8 @@ export const MapWorkspace = () => {
         <OpenLayersMap />
       </div>
 
-      {/* Top Bar Overlay */}
-      <div className="absolute top-0 left-0 right-0 p-4 flex items-center justify-between z-20 pointer-events-none">
         {/* Left Section */}
-        <div className="flex items-center gap-3">
+        <div className="absolute top-4 left-4 flex items-center gap-3 z-20 pointer-events-none">
           {/* Mobile Sidebar Toggle */}
           <button 
             onClick={() => setMobileOpen(true)}
@@ -96,7 +94,7 @@ export const MapWorkspace = () => {
         </div>
 
         {/* Right Section - Controls */}
-        <div className="flex flex-col gap-2 pointer-events-auto relative">
+        <div className="absolute top-4 right-4 flex flex-col gap-2 pointer-events-auto z-20">
           {/* Base Map Selector */}
           <div className="relative">
             <button
@@ -249,7 +247,6 @@ export const MapWorkspace = () => {
             )}
           </div>
         </div>
-      </div>
 
       {/* Chat Panel (Floating / Split) */}
       <div 

@@ -11,7 +11,7 @@ import { SchemaType, type FunctionDeclaration } from "@google/generative-ai";
 import { NAVIGATION_TOOLS } from "./navigation";
 import { LAYER_TOOLS } from "./layers";
 import { DRAWING_TOOLS } from "./drawing";
-import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "./types";
+import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "@/config/clientTools/types";
 import type { MCPTool } from "@/types/mcp.types";
 
 // ─── Raw Definitions (Provider-Agnostic) ──────────────────────

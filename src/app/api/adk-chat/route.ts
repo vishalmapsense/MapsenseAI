@@ -2,11 +2,15 @@ import { NextRequest } from "next/server";
 import {
   Runner,
   InMemorySessionService,
+  getSessionServiceFromUri,
   InMemoryArtifactService,
   InMemoryMemoryService,
+  BaseSessionService,
   stringifyContent,
 } from "@google/adk";
-import { createUserContent } from "@google/genai";
+import { createUserContent, GoogleGenAI } from "@google/genai";
+import { cookies } from "next/headers";
+import { createClient } from "@/utils/supabase/server";
 import { createADKAgent } from "@/agents/adkAgent";
 import type { MapCommand } from "@/stores/useMapStore";
 import { normalizeToGeoJSON, fetchAndNormalizeSpatialUrl } from "@/utils/spatialNormalizer";
@@ -36,13 +40,24 @@ const resolveMcpResource = async (uri: string) => {
 
 // Server-wide singletons for ADK state persistence across requests & HMR reloads
 const globalForADK = globalThis as unknown as {
-  adkSessionService?: InMemorySessionService;
+  adkSessionService?: BaseSessionService;
   adkArtifactService?: InMemoryArtifactService;
   adkMemoryService?: InMemoryMemoryService;
 };
 
-const globalSessionService =
-  globalForADK.adkSessionService ?? new InMemorySessionService();
+const initSessionService = (): BaseSessionService => {
+  const dbUri = process.env.ADK_SESSION_DB_URI || "sqlite://mapsense_adk.sqlite";
+  try {
+    console.log(`🗄️ [ADK] Initializing DatabaseSessionService (${dbUri})...`);
+    return getSessionServiceFromUri(dbUri);
+  } catch (err) {
+    console.warn("⚠️ [ADK] Could not initialize DatabaseSessionService, falling back to InMemorySessionService:", err);
+    return new InMemorySessionService();
+  }
+};
+
+export const globalSessionService =
+  globalForADK.adkSessionService ?? initSessionService();
 const globalArtifactService =
   globalForADK.adkArtifactService ?? new InMemoryArtifactService();
 const globalMemoryService =
@@ -98,6 +113,16 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: "Missing messages" }), { status: 400 });
   }
 
+  const cookieStore = await cookies();
+  const supabase = createClient(cookieStore);
+  const { data: { user } } = await supabase.auth.getUser();
+
+  if (!user) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), { status: 401 });
+  }
+
+  const userId = user.email || user.id;
+
   const sessionId = requestedSessionId || "default_adk_session";
 
   // Get the latest user message
@@ -115,7 +140,7 @@ export async function POST(req: NextRequest) {
       try {
         sendEvent({ type: "status", message: "Initializing ADK Agent..." });
 
-        const { rootAgent, mapboxMcpToolset } = createADKAgent(apiKey);
+        const { rootAgent, mapboxMcpToolset } = createADKAgent(apiKey, lastMessage);
         mcpToolsetRef = mapboxMcpToolset;
 
         const runner = new Runner({
@@ -128,15 +153,50 @@ export async function POST(req: NextRequest) {
 
         let session = await runner.sessionService.getSession({
           appName: runner.appName,
-          userId: "adk_test_user",
+          userId: userId,
           sessionId: sessionId,
         });
 
+        let isNewSession = false;
         if (!session) {
+          isNewSession = true;
           session = await runner.sessionService.createSession({
             appName: runner.appName,
-            userId: "adk_test_user",
+            userId: userId,
             sessionId: sessionId,
+          });
+        }
+        let activeTitle: string | undefined;
+
+        if (isNewSession || (session.events && session.events.length === 0)) {
+          let generatedTitle = lastMessage.slice(0, 30) + (lastMessage.length > 30 ? "..." : "");
+          try {
+            const ai = new GoogleGenAI({ apiKey });
+            const response = await ai.models.generateContent({
+              model: "gemini-3.1-flash-lite",
+              contents: `Generate a concise, professional 2 to 4 word topic heading for a chat conversation starting with this user message:\n\n"${lastMessage}"\n\nRules:\n- Keep it natural, clean, and highly relevant (2 to 4 words max).\n- Use Title Case formatting.\n- Do NOT use quotes, special symbols, or strange formatting.\n- Output ONLY the heading text.`
+            });
+            if (response.text) {
+              generatedTitle = response.text.trim().replace(/^["']|["']$/g, '');
+            }
+          } catch (e) {
+            console.error("Failed to generate title with LLM", e);
+          }
+
+          activeTitle = generatedTitle;
+
+          // Save title to session state
+          await runner.sessionService.appendEvent({
+            session,
+            event: {
+              id: crypto.randomUUID(),
+              invocationId: crypto.randomUUID(),
+              timestamp: Date.now(),
+              source: "system",
+              actions: {
+                stateDelta: { title: generatedTitle }
+              }
+            } as any
           });
         }
 
@@ -404,6 +464,7 @@ export async function POST(req: NextRequest) {
             toolCalls: toolCallsMade,
             clientToolCommands: clientToolCommands,
             usage: finalUsage,
+            title: activeTitle,
           }
         });
 
