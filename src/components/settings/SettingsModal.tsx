@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   X,
@@ -19,6 +19,8 @@ import {
   Sun,
   Layout,
   LogOut,
+  Copy,
+  Trash2,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
@@ -30,6 +32,9 @@ import {
 } from "@/stores/useModelSettingsStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 import { useAuthStore } from "@/stores/useAuthStore";
+import { useChatStore } from "@/stores/useChatStore";
+import { Share2 } from "lucide-react";
+import { toast } from "sonner";
 
 // ─── Provider Icons ───────────────────────────────────────────
 
@@ -263,14 +268,31 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type SettingsTab = "general" | "models" | "apikeys" | "theme" | "account";
+type SettingsTab = "general" | "models" | "apikeys" | "theme" | "account" | "chat";
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("models");
+  const [chatSubTab, setChatSubTab] = useState<"menu" | "shared">("menu");
+  const [isFetchingShares, setIsFetchingShares] = useState(false);
   const [filter, setFilter] = useState<"all" | "free" | "paid">("all");
   const { selectedModelId, setSelectedModel } = useModelSettingsStore();
   const { layout, setLayout } = useSidebarStore();
   const { user, signOut } = useAuthStore();
+  const { mySharedSessions, fetchMySharedSessions, toggleShareStatus, deleteSharedSession } = useChatStore();
+
+  useEffect(() => {
+    if (open && tab === "chat" && chatSubTab === "shared" && user) {
+      setIsFetchingShares(true);
+      fetchMySharedSessions().finally(() => setIsFetchingShares(false));
+    }
+  }, [open, tab, chatSubTab, user, fetchMySharedSessions]);
+
+  // Reset subtab when tab changes
+  useEffect(() => {
+    if (tab !== "chat") {
+      setChatSubTab("menu");
+    }
+  }, [tab]);
 
   // Prevent hydration mismatch
   const [mounted, setMounted] = useState(false);
@@ -292,6 +314,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
   // Sidebar Menu Items
   const MENU_ITEMS = [
     { id: "general", label: "General", icon: Settings },
+    { id: "chat", label: "Chat Settings", icon: Share2 },
     { id: "models", label: "LLM Models", icon: Brain },
     { id: "apikeys", label: "API Keys", icon: Key },
     { id: "theme", label: "Appearance", icon: Palette },
@@ -636,8 +659,8 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                         <div className="bg-zinc-50 dark:bg-zinc-900/50 rounded-xl border border-zinc-200 dark:border-zinc-800 p-4 flex items-center justify-between gap-4">
                           <div className="flex items-center gap-3">
                             <div className="w-10 h-10 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-semibold text-sm shrink-0 overflow-hidden shadow-sm">
-                              {user?.user_metadata?.avatar_url ? (
-                                <img src={user.user_metadata.avatar_url} alt="Avatar" className="w-full h-full object-cover" />
+                              {(user?.user_metadata?.avatar_url || user?.user_metadata?.picture) ? (
+                                <img src={user.user_metadata.avatar_url || user.user_metadata.picture} referrerPolicy="no-referrer" alt="Avatar" className="w-full h-full object-cover" />
                               ) : (
                                 (user?.email || "U").charAt(0).toUpperCase()
                               )}
@@ -663,6 +686,154 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                             Sign Out
                           </button>
                         </div>
+                      </motion.div>
+                    )}
+
+                    {/* ── Chat Settings ── */}
+                    {tab === "chat" && (
+                      <motion.div
+                        key="chat"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.15 }}
+                      >
+                        {chatSubTab === "menu" ? (
+                          <>
+                            <div>
+                              <h3 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+                                Chat Settings
+                              </h3>
+                              <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-6">
+                                Configure your chat preferences and sharing options.
+                              </p>
+                            </div>
+                            
+                            <div className="space-y-3">
+                              <button
+                                onClick={() => setChatSubTab("shared")}
+                                className="w-full p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30 flex items-center justify-between hover:bg-zinc-100 dark:hover:bg-zinc-800/50 transition-colors"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <div className="w-10 h-10 rounded-lg bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400">
+                                    <Share2 className="w-5 h-5" />
+                                  </div>
+                                  <div className="text-left flex flex-col">
+                                    <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                                      Shared Chats
+                                    </span>
+                                    <span className="text-[11px] text-zinc-500">
+                                      View and manage your public chat links
+                                    </span>
+                                  </div>
+                                </div>
+                                <span className="text-zinc-400 dark:text-zinc-500">
+                                  &rarr;
+                                </span>
+                              </button>
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            <div className="flex items-center gap-3 mb-6">
+                              <button
+                                onClick={() => setChatSubTab("menu")}
+                                className="p-2 rounded-lg hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-500 transition-colors"
+                              >
+                                &larr;
+                              </button>
+                              <div>
+                                <h3 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
+                                  Shared Chats
+                                </h3>
+                                <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
+                                  Manage your shared chats and permissions
+                                </p>
+                              </div>
+                            </div>
+
+                            <div className="space-y-3">
+                              {isFetchingShares ? (
+                                <div className="text-center py-8 text-sm text-zinc-500 flex items-center justify-center gap-2">
+                                  <div className="w-4 h-4 border-2 border-zinc-300 border-t-blue-500 rounded-full animate-spin" />
+                                  Loading shared chats...
+                                </div>
+                              ) : mySharedSessions.length === 0 ? (
+                                <div className="text-center py-8 text-sm text-zinc-500">
+                                  You haven't shared any chats yet.
+                                </div>
+                              ) : (
+                                mySharedSessions.map((session) => (
+                                  <div key={session.share_token} className="p-4 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30 flex items-center justify-between">
+                                    <div className="flex flex-col min-w-0 pr-4">
+                                      <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+                                        {session.title}
+                                      </span>
+                                      <span className="text-[11px] text-zinc-500 truncate mt-0.5">
+                                        Shared on: {new Date(session.created_at).toLocaleDateString()}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-2 shrink-0">
+                                      <div className="flex flex-col items-end gap-1.5 mr-2">
+                                        <span className={`text-[10px] uppercase font-bold tracking-wider ${session.is_public ? 'text-green-600 dark:text-green-400' : 'text-zinc-500'}`}>
+                                          {session.is_public ? "Public" : "Private"}
+                                        </span>
+                                        <button
+                                          onClick={() => {
+                                            toast.promise(
+                                              toggleShareStatus(session.share_token, !session.is_public),
+                                              {
+                                                loading: "Updating permissions...",
+                                                success: session.is_public ? "Chat is now private" : "Chat is now public",
+                                                error: "Failed to update permissions"
+                                              }
+                                            );
+                                          }}
+                                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${session.is_public ? "bg-green-500" : "bg-zinc-300 dark:bg-zinc-700"}`}
+                                        >
+                                          <span
+                                            className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${session.is_public ? "translate-x-5" : "translate-x-1"}`}
+                                          />
+                                        </button>
+                                      </div>
+
+                                      <div className="w-[1px] h-8 bg-zinc-200 dark:bg-zinc-800 mx-1" />
+
+                                      <button
+                                        onClick={() => {
+                                          const url = `${window.location.origin}/?shareId=${session.share_token}`;
+                                          navigator.clipboard.writeText(url);
+                                          toast.success("Link copied to clipboard!");
+                                        }}
+                                        className="p-1.5 text-zinc-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-500/10 rounded-md transition-colors"
+                                        title="Copy Link"
+                                      >
+                                        <Copy className="w-4 h-4" />
+                                      </button>
+
+                                      <button
+                                        onClick={() => {
+                                          toast.promise(
+                                            deleteSharedSession(session.share_token),
+                                            {
+                                              loading: "Deleting share link...",
+                                              success: "Share link deleted",
+                                              error: "Failed to delete"
+                                            }
+                                          );
+                                        }}
+                                        className="p-1.5 text-zinc-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-500/10 rounded-md transition-colors"
+                                        title="Delete Link"
+                                      >
+                                        <Trash2 className="w-4 h-4" />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </>
+                        )}
                       </motion.div>
                     )}
 

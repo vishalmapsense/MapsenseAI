@@ -140,7 +140,7 @@ export async function POST(req: NextRequest) {
       try {
         sendEvent({ type: "status", message: "Initializing ADK Agent..." });
 
-        const { rootAgent, mapboxMcpToolset } = createADKAgent(apiKey, lastMessage);
+        const { rootAgent, mapboxMcpToolset } = await createADKAgent(apiKey, lastMessage);
         mcpToolsetRef = mapboxMcpToolset;
 
         const runner = new Runner({
@@ -213,12 +213,22 @@ export async function POST(req: NextRequest) {
           newMessage: userContent,
         })) {
           const agentName = event.author;
+          
+          console.log(`\n======================================================`);
+          console.log(`🔄 [ADK Flow] Current Active Agent: ${agentName}`);
+          console.log(`======================================================`);
 
           // Process parts of the event
           if (event.content?.parts) {
             for (const part of event.content.parts) {
+              if (part.text) {
+                console.log(`💬 [ADK Flow - ${agentName}] generated text:`, part.text.substring(0, 100).replace(/\n/g, ' ') + (part.text.length > 100 ? "..." : ""));
+              }
+              
               if (part.functionCall) {
                 const call = part.functionCall;
+                console.log(`🛠️ [ADK Flow - ${agentName}] called tool: ${call.name}`);
+                
                 sendEvent({ type: "status", message: `Executing tool: ${call.name}` });
                 
                 if (agentName && agentName !== "user") {
@@ -287,6 +297,21 @@ export async function POST(req: NextRequest) {
                 // Extract spatial data from MCP tool responses
                 // MCP tool results come as: { content: [...], structuredContent: {...}, isError: false }
                 if (res.response) {
+                  console.log(`\n=================== 📊 DATA LOGGER ===================`);
+                  console.log(`[Source Tool]: ${res.name}`);
+                  try {
+                    const dataString = JSON.stringify(res.response, null, 2);
+                    // Print up to 1500 chars to avoid freezing the terminal with massive GeoJSONs
+                    if (dataString.length > 1500) {
+                      console.log(dataString.substring(0, 1500) + "\n... [DATA TRUNCATED IN CONSOLE FOR READABILITY]");
+                    } else {
+                      console.log(dataString);
+                    }
+                  } catch (e) {
+                    console.log("Could not stringify data:", res.response);
+                  }
+                  console.log(`======================================================\n`);
+
                   console.log("📦 [ADK Route] functionResponse for tool:", res.name, "| Keys:", Object.keys(res.response));
 
                   let norm: any = null;

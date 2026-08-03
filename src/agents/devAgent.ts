@@ -5,8 +5,15 @@ import path from "path";
 // Load .env.local to ensure environment variables are available for the ADK web server
 dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
 
-// createADKAgent will return the rootAgent.
-const { rootAgent } = createADKAgent();
+// createADKAgent is now async, so we resolve it and export the rootAgent.
+let rootAgent: any;
 
-// ADK web CLI expects an export named 'rootAgent'
-export { rootAgent };
+const init = async () => {
+  const result = await createADKAgent();
+  rootAgent = result.rootAgent;
+};
+
+// Start initialization immediately
+const initPromise = init();
+
+export { rootAgent, initPromise };

@@ -21,6 +21,15 @@ export interface ChatSession {
   updatedAt: number;
 }
 
+export interface SharedSessionRecord {
+  share_token: string;
+  user_id: string;
+  session_id: string;
+  title: string;
+  is_public: boolean;
+  created_at: string;
+}
+
 interface ChatState {
   sessions: ChatSession[];
   activeSessionId: string | null;
@@ -32,6 +41,7 @@ interface ChatState {
   isChatMinimized: boolean;
   isTransparentMode: boolean;
   userLocation: { lat: number; lng: number } | null;
+  mySharedSessions: SharedSessionRecord[];
 
   sendMessage: (text: string) => Promise<void>;
   editAndResendMessage: (messageId: string, newText: string) => Promise<void>;
@@ -46,9 +56,13 @@ interface ChatState {
   loadSessionHistory: (sessionId: string) => Promise<void>;
   loadSharedSession: (shareId: string) => Promise<void>;
   deleteSession: (sessionId: string) => Promise<void>;
-  deleteAllSessions: () => Promise<void>;
+  deleteAllSessions: () => void;
   renameSession: (sessionId: string, newTitle: string) => void;
   initUserLocation: () => Promise<void>;
+  fetchMySharedSessions: () => Promise<void>;
+  toggleShareStatus: (shareToken: string, isPublic: boolean) => Promise<void>;
+  shareSession: (sessionId: string, title?: string) => Promise<string | null>;
+  deleteSharedSession: (shareToken: string) => Promise<void>;
 }
 
 function generateId(): string {
@@ -84,6 +98,7 @@ export const useChatStore = create<ChatState>((set, get) => {
   isChatMinimized: false,
   isTransparentMode: false,
   userLocation: null,
+  mySharedSessions: [],
 
   sendMessage: async (text: string) => {
     const auth = useAuthStore.getState();
@@ -515,9 +530,8 @@ export const useChatStore = create<ChatState>((set, get) => {
       const data = await res.json();
       if (data.messages) {
         set((state) => {
-          // Check if session already exists, if not, add it as a temporary session
-          const decoded = atob(shareId);
-          const sessionId = decoded.split("|")[1] || `shared-${shareId}`;
+          // Add as temporary session if not exists
+          const sessionId = `shared-${shareId}`;
           const existingSession = state.sessions.find(s => s.id === sessionId);
           
           let updatedSessions = state.sessions;
@@ -652,6 +666,75 @@ export const useChatStore = create<ChatState>((set, get) => {
         console.warn("Geolocation error:", error);
       }
     }
-  }
+  },
+
+  fetchMySharedSessions: async () => {
+    try {
+      const res = await fetch("/api/adk-chat/share");
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success) {
+          set({ mySharedSessions: data.sharedSessions });
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch shared sessions:", err);
+    }
+  },
+
+  toggleShareStatus: async (shareToken: string, isPublic: boolean) => {
+    try {
+      const res = await fetch(`/api/adk-chat/share/${shareToken}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_public: isPublic }),
+      });
+      if (res.ok) {
+        set((state) => ({
+          mySharedSessions: state.mySharedSessions.map((s) =>
+            s.share_token === shareToken ? { ...s, is_public: isPublic } : s
+          ),
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to toggle share status:", err);
+    }
+  },
+
+  shareSession: async (sessionId: string, title?: string) => {
+    try {
+      const res = await fetch("/api/adk-chat/share", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, title }),
+      });
+      const data = await res.json();
+      if (data.success && data.shareToken) {
+        get().fetchMySharedSessions();
+        return data.shareToken;
+      }
+      return null;
+    } catch (err) {
+      console.error("Failed to share session:", err);
+      return null;
+    }
+  },
+
+  deleteSharedSession: async (shareToken: string) => {
+    try {
+      const res = await fetch(`/api/adk-chat/share/${shareToken}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        set((state) => ({
+          mySharedSessions: state.mySharedSessions.filter(
+            (s) => s.share_token !== shareToken
+          ),
+        }));
+      }
+    } catch (err) {
+      console.error("Failed to delete shared session:", err);
+    }
+  },
   };
 });

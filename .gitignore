@@ -43,3 +43,7 @@ CLAUDE.md
 next-env.d.ts
 skills-lock.json
 .agents
+# ADK local database
+mapsense_adk.sqlite
+*.sqlite
+*.sqlite3

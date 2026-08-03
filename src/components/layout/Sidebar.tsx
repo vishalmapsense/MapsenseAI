@@ -14,7 +14,7 @@ import { useChatStore } from "@/stores/useChatStore";
 import { toast } from "sonner";
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
-  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession } = useChatStore();
+  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession, shareSession } = useChatStore();
   const { user, signInWithGoogle, signOut, isLoading: authLoading } = useAuthStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
@@ -22,9 +22,10 @@ export const Sidebar = () => {
   // Prevent hydration mismatch on initial render with persistent state
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    console.log("DEBUG: Supabase User object:", user);
     setMounted(true);
     fetchSessions();
-  }, [fetchSessions]);
+  }, [fetchSessions, user]);
 
   if (!mounted) return null;
 
@@ -76,24 +77,26 @@ export const Sidebar = () => {
                   label="Recent Chats"
                   tooltipContent={
                     <div className="flex flex-col gap-1 min-w-[180px] py-1 pointer-events-auto">
-                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1 font-semibold px-2">
+                      <div className="text-[9px] text-muted-foreground uppercase tracking-wider mb-1 font-semibold px-2 shrink-0">
                         Recent Conversations
                       </div>
-                      {sessions.length === 0 && (
-                        <div className="text-[10px] text-muted-foreground/70 px-2 italic">No chats yet</div>
-                      )}
-                      {sessions.map((item) => (
-                        <div
-                          key={item.id}
-                          onClick={() => loadSessionHistory(item.id)}
-                          className={cn(
-                            "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors",
-                            item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
-                          )}
-                        >
-                          {item.title}
-                        </div>
-                      ))}
+                      <div className="flex flex-col gap-1 max-h-[60vh] overflow-y-auto overflow-x-hidden [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
+                        {sessions.length === 0 && (
+                          <div className="text-[10px] text-muted-foreground/70 px-2 italic">No chats yet</div>
+                        )}
+                        {sessions.map((item) => (
+                          <div
+                            key={item.id}
+                            onClick={() => loadSessionHistory(item.id)}
+                            className={cn(
+                              "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors shrink-0",
+                              item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
+                            )}
+                          >
+                            {item.title}
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   }
                 />
@@ -114,7 +117,7 @@ export const Sidebar = () => {
             transition={{ duration: 0.1, ease: [0.25, 0.1, 0.25, 1] }}
             className="flex-1 overflow-hidden flex flex-col min-h-0 w-full"
           >
-            <ScrollArea className="flex-1 px-3">
+            <div className="flex-1 overflow-y-auto overflow-x-hidden px-3 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
               <div className="px-2 mb-2 mt-2 text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                 Recent Conversations
               </div>
@@ -133,11 +136,19 @@ export const Sidebar = () => {
                     onRename={(newTitle) => renameSession(item.id, newTitle)}
                     onShare={() => {
                       if (user) {
-                        const userId = user.email || user.id;
-                        const shareId = btoa(`${userId}|${item.id}`);
-                        const shareUrl = `${window.location.origin}/?shareId=${shareId}`;
-                        navigator.clipboard.writeText(shareUrl);
-                        toast.success("Public share link copied to clipboard!");
+                        toast.promise(
+                          shareSession(item.id, item.title).then((shareToken) => {
+                            if (!shareToken) throw new Error("Failed");
+                            const shareUrl = `${window.location.origin}/?shareId=${shareToken}`;
+                            navigator.clipboard.writeText(shareUrl);
+                            return shareUrl;
+                          }),
+                          {
+                            loading: "Generating share link...",
+                            success: "Public share link copied to clipboard!",
+                            error: "Failed to generate share link",
+                          }
+                        );
                       } else {
                         useAuthStore.getState().setAuthModalOpen(true);
                       }
@@ -168,7 +179,7 @@ export const Sidebar = () => {
                   </div>
                 )}
               </div>
-            </ScrollArea>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -182,9 +193,9 @@ export const Sidebar = () => {
               onClick={() => setSettingsOpen(true)}
               className="px-2 py-2 flex items-center gap-2 overflow-hidden hover:bg-sidebar-accent/50 rounded-md cursor-pointer transition-colors"
             >
-              <div className="w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center text-primary font-medium text-xs flex-shrink-0 overflow-hidden">
-                {user.user_metadata?.avatar_url ? (
-                  <img src={user.user_metadata.avatar_url} alt="Profile" className="w-full h-full object-cover" />
+              <div className="w-8 h-8 rounded-full bg-blue-100 dark:bg-blue-900/30 flex items-center justify-center text-blue-600 dark:text-blue-400 font-semibold text-sm shrink-0 overflow-hidden shadow-sm">
+                {(user.user_metadata?.avatar_url || user.user_metadata?.picture) ? (
+                  <img src={user.user_metadata.avatar_url || user.user_metadata.picture} referrerPolicy="no-referrer" alt="Profile" className="w-full h-full object-cover" />
                 ) : (
                   (user.user_metadata?.full_name || user.email || 'U').charAt(0).toUpperCase()
                 )}
