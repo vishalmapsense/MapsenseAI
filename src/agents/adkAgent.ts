@@ -15,7 +15,7 @@ const HITL_RULE =
   "- Write a message directly asking the user for the missing details or permission.\n" +
   "- When the user replies (or clicks an option button), workflow execution will resume from this exact step using session history.";
 
-export async function createADKAgent(apiKey?: string, userPrompt?: string) {
+export function createADKAgent(apiKey?: string, userPrompt?: string) {
   // 1. Map all client tools to ADK FunctionTools
   const adkClientTools = ALL_CLIENT_TOOLS.map((clientTool) => {
     return new FunctionTool({
@@ -54,6 +54,23 @@ export async function createADKAgent(apiKey?: string, userPrompt?: string) {
   });
 
   // 2. Set up the Mapbox MCP Toolset
+  const mapboxToolsToLoad = userPrompt
+    ? getDynamicTools(userPrompt)
+    : [
+        "search_and_geocode_tool",
+        "reverse_geocode_tool",
+        "isochrone_tool",
+        "directions_tool",
+        "category_search_tool",
+        "ground_location_tool",
+      ];
+
+  console.log(`[Mapbox MCP] Query: "${userPrompt || "none"}"`);
+  console.log(
+    `[Mapbox MCP] Loading ${mapboxToolsToLoad.length} tools:`,
+    mapboxToolsToLoad,
+  );
+
   const mapboxMcpToolset = new MCPToolset(
     {
       type: "StdioConnectionParams",
@@ -73,17 +90,7 @@ export async function createADKAgent(apiKey?: string, userPrompt?: string) {
         } as Record<string, string>,
       },
     },
-    // AI-powered tool selection: LLM reads tool catalog and picks relevant tools
-    userPrompt
-      ? await getAISelectedTools(userPrompt, apiKey)
-      : [
-          "search_and_geocode_tool",
-          "reverse_geocode_tool",
-          "isochrone_tool",
-          "directions_tool",
-          "category_search_tool",
-          "ground_location_tool",
-        ]
+    mapboxToolsToLoad,
   );
 
   // 3. Set up the Playg MCP Toolset
@@ -91,15 +98,18 @@ export async function createADKAgent(apiKey?: string, userPrompt?: string) {
     type: "StdioConnectionParams",
     serverParams: {
       command: "node",
-      args: ["/Users/vishalkushwaha/Mapsense/MapsenseAI/playg-mcp-server/build/index.js"],
+      args: [
+        "/Users/vishalkushwaha/Mapsense/MapsenseAI/playg-mcp-server/build/index.js",
+      ],
       env: {
         ...process.env,
         PLAYG_API_BASE: "http://localhost:8000",
         USER_AGENT: "playg-mcp-server/1.0",
         REDIS_URL: "redis://localhost:6379",
-        BEARER_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTcwNTg3N30.eSXBYQ-yAfPqdWVfNxS8Y8AR9uMA5VlGX3j_k0elnik",
+        BEARER_TOKEN:
+          "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTcwNTg3N30.eSXBYQ-yAfPqdWVfNxS8Y8AR9uMA5VlGX3j_k0elnik",
         INSTANCE_PATH: "",
-        FILE_PATH: ""
+        FILE_PATH: "",
       } as Record<string, string>,
     },
   });
@@ -112,7 +122,8 @@ export async function createADKAgent(apiKey?: string, userPrompt?: string) {
   const mapboxAgent = new LlmAgent({
     model: modelToUse,
     name: "mapbox_agent",
-    description: "Handles geocoding, place search, directions, isochrones, and all Mapbox spatial data.",
+    description:
+      "Handles geocoding, place search, directions, isochrones, and all Mapbox spatial data.",
     instruction: `You search for places, geocode locations, and fetch spatial data using Mapbox MCP tools.
 Execute the requested tool(s) and return a clear technical summary with all geographic data found.
 CRITICAL RULE: If a tool returns a URI, URL, or data reference (e.g. Response_URL) for spatial data, DO NOT try to fetch, query, or read it yourself. Simply return the URL reference as it is to the parent (backend function).
@@ -127,7 +138,8 @@ ${HITL_RULE}`,
   const playgroundAgent = new LlmAgent({
     model: modelToUse,
     name: "playground_agent",
-    description: "Handles Playground-specific tools: zip boundary data, DuckDB queries, instance/file operations.",
+    description:
+      "Handles Playground-specific tools: zip boundary data, DuckDB queries, instance/file operations.",
     instruction: `You use Playground MCP tools to fetch or manipulate data.
 Execute the requested tool(s) and return a clear technical summary with all data found.
 CRITICAL RULE: If a tool returns a URI, URL, or data reference (e.g. Response_URL) for spatial data, DO NOT try to fetch, query, or read it yourself (e.g., do not use DuckDB on it). Simply return the URL reference as it is to the parent (backend function).
@@ -142,7 +154,8 @@ ${HITL_RULE}`,
   const mapUiAgent = new LlmAgent({
     model: modelToUse,
     name: "map_ui_agent",
-    description: "Executes map UI actions: fly_to, zoom, draw, markers, map_load_url, add_geojson, clear map.",
+    description:
+      "Executes map UI actions: fly_to, zoom, draw, markers, map_load_url, add_geojson, clear map.",
     instruction: `You execute map UI actions (fly_to, zoom, draw, markers, map_load_url, etc.) using client tools.
 You will receive coordinates, spatial data URLs, and context from the conversation history.
 Use the appropriate map tool with the correct arguments (lat, lng, zoom, url, etc.). If a previous agent provided a URL to draw, use the 'map_load_url' tool.
@@ -160,7 +173,8 @@ ${HITL_RULE}`,
   const verifyingAgent = new LlmAgent({
     model: modelToUse,
     name: "verifying_agent",
-    description: "Checks if all parts of the user's request were completed. Writes the final user response if done, or reports what is still pending.",
+    description:
+      "Checks if all parts of the user's request were completed. Writes the final user response if done, or reports what is still pending.",
     instruction: `You are the Verifying Agent. You are called by planner_agent AFTER work agents have finished.
 
 YOUR JOB:
@@ -188,7 +202,8 @@ ${HITL_RULE}`,
   const plannerAgent = new LlmAgent({
     model: modelToUse,
     name: "planner_agent",
-    description: "Routes queries to the correct agent, then asks verifying_agent to confirm completion.",
+    description:
+      "Routes queries to the correct agent, then asks verifying_agent to confirm completion.",
     instruction: `You are the Planner — the main orchestrator of all map/data work.
 
 STEP 1 — ROUTE TO THE RIGHT WORK AGENT:
@@ -223,7 +238,8 @@ ${HITL_RULE}`,
   const rootAgent = new LlmAgent({
     model: modelToUse,
     name: "root_agent",
-    description: "Main entry point — handles general chat or delegates map/data work to planner.",
+    description:
+      "Main entry point — handles general chat or delegates map/data work to planner.",
     instruction: `You are Mapsense AI — a smart map assistant.
 
 ROUTING — follow these rules for EVERY message:
@@ -238,4 +254,3 @@ ${HITL_RULE}`,
 
   return { rootAgent, mapboxMcpToolset, playgMcpToolset };
 }
-
