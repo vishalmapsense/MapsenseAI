@@ -10,7 +10,8 @@ import { toast } from "sonner";
 
 interface SidebarItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   icon: LucideIcon;
-  label: string;
+  label: string | React.ReactNode;
+  rawTitle?: string;
   tooltipContent?: React.ReactNode;
   isActive?: boolean;
   onDelete?: (e: React.MouseEvent) => void;
@@ -19,19 +20,19 @@ interface SidebarItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement>
 }
 
 export const SidebarItem = React.forwardRef<HTMLButtonElement, SidebarItemProps>(
-  ({ icon: Icon, label, tooltipContent, isActive, onDelete, onRename, onShare, className, ...props }, ref) => {
+  ({ icon: Icon, label, rawTitle, tooltipContent, isActive, onDelete, onRename, onShare, className, ...props }, ref) => {
     const isCollapsed = useSidebarStore((state) => state.isCollapsed);
     const [showTooltip, setShowTooltip] = React.useState(false);
     const [tooltipPos, setTooltipPos] = React.useState({ top: 0, left: 0 });
     const [isMenuOpen, setIsMenuOpen] = React.useState(false);
     const [isModalOpen, setIsModalOpen] = React.useState(false);
-    const [editTitle, setEditTitle] = React.useState(label);
+    const [editTitle, setEditTitle] = React.useState(rawTitle || (typeof label === "string" ? label : ""));
     const itemRef = React.useRef<HTMLDivElement>(null);
     const menuRef = React.useRef<HTMLDivElement>(null);
 
     React.useEffect(() => {
-      setEditTitle(label);
-    }, [label]);
+      setEditTitle(rawTitle || (typeof label === "string" ? label : ""));
+    }, [label, rawTitle]);
 
     React.useEffect(() => {
       const handleClickOutside = (e: MouseEvent) => {

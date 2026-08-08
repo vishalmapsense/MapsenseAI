@@ -14,7 +14,7 @@ import { useChatStore } from "@/stores/useChatStore";
 import { toast } from "sonner";
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
-  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession, shareSession } = useChatStore();
+  const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession, shareSession, mySharedSessions, fetchMySharedSessions } = useChatStore();
   const { user, signInWithGoogle, signOut, isLoading: authLoading } = useAuthStore();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
@@ -25,7 +25,10 @@ export const Sidebar = () => {
     console.log("DEBUG: Supabase User object:", user);
     setMounted(true);
     fetchSessions();
-  }, [fetchSessions, user]);
+    if (user) {
+      fetchMySharedSessions();
+    }
+  }, [fetchSessions, fetchMySharedSessions, user]);
 
   if (!mounted) return null;
 
@@ -84,18 +87,26 @@ export const Sidebar = () => {
                         {sessions.length === 0 && (
                           <div className="text-[10px] text-muted-foreground/70 px-2 italic">No chats yet</div>
                         )}
-                        {sessions.map((item) => (
-                          <div
-                            key={item.id}
-                            onClick={() => loadSessionHistory(item.id)}
-                            className={cn(
-                              "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors shrink-0",
-                              item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
-                            )}
-                          >
-                            {item.title}
-                          </div>
-                        ))}
+                        {sessions.map((item) => {
+                          const isSharedByMe = mySharedSessions.some((s) => s.session_id === item.id);
+                          const isViewedShared = item.id.startsWith("shared-");
+                          const showSharedBadge = isSharedByMe || isViewedShared;
+                          return (
+                            <div
+                              key={item.id}
+                              onClick={() => loadSessionHistory(item.id)}
+                              className={cn(
+                                "text-xs px-2 py-1 hover:bg-sidebar-accent/50 hover:text-foreground rounded-md cursor-pointer truncate transition-colors shrink-0 flex items-center justify-between gap-2",
+                                item.id === activeSessionId && "bg-sidebar-accent/50 text-foreground font-medium"
+                              )}
+                            >
+                              <span className="truncate">{item.title}</span>
+                              {showSharedBadge && (
+                                <span className="text-[7px] bg-blue-500/10 text-blue-500 dark:bg-blue-500/20 dark:text-blue-400 px-1 py-[2px] rounded uppercase tracking-wider shrink-0 font-bold leading-none">SHARED</span>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   }
@@ -126,15 +137,35 @@ export const Sidebar = () => {
                 {sessions.length === 0 && (
                   <div className="text-xs text-muted-foreground/70 px-4 py-2 italic">No chats yet</div>
                 )}
-                {sessions.map((item) => (
-                  <SidebarItem
-                    key={item.id}
-                    icon={MessageSquare}
-                    label={item.title}
-                    isActive={item.id === activeSessionId}
-                    onDelete={() => deleteSession(item.id)}
-                    onRename={(newTitle) => renameSession(item.id, newTitle)}
+                {sessions.map((item) => {
+                  const isSharedByMe = mySharedSessions.some((s) => s.session_id === item.id);
+                  const isViewedShared = item.id.startsWith("shared-");
+                  const showSharedBadge = isSharedByMe || isViewedShared;
+                  return (
+                    <SidebarItem
+                      key={item.id}
+                      icon={MessageSquare}
+                      rawTitle={item.title}
+                      label={
+                        <div className="flex items-center gap-2 overflow-hidden w-full">
+                          <span className="truncate">{item.title}</span>
+                          {showSharedBadge && (
+                            <span className="text-[7px] bg-blue-500/10 text-blue-500 dark:bg-blue-500/20 dark:text-blue-400 px-1 py-[2px] rounded uppercase tracking-wider font-bold shrink-0 leading-none">SHARED</span>
+                          )}
+                        </div>
+                      }
+                      isActive={item.id === activeSessionId}
+                    onDelete={isViewedShared ? undefined : () => deleteSession(item.id)}
+                    onRename={isViewedShared ? undefined : (newTitle) => renameSession(item.id, newTitle)}
                     onShare={() => {
+                      if (isViewedShared) {
+                        const shareId = item.id.replace("shared-", "");
+                        const shareUrl = `${window.location.origin}/?shareId=${shareId}`;
+                        navigator.clipboard.writeText(shareUrl);
+                        toast.success("Link copied to clipboard!");
+                        return;
+                      }
+
                       if (user) {
                         toast.promise(
                           shareSession(item.id, item.title).then((shareToken) => {
@@ -159,9 +190,10 @@ export const Sidebar = () => {
                       setMobileOpen(false);
                     }}
                   />
-                ))}
+                );
+              })}
                 
-                {sessions.length > 0 && (
+              {sessions.some(s => !s.id.startsWith("shared-")) && (
                   <div className="px-3 pt-4 pb-2 w-full">
                     <button 
                       onClick={() => {
@@ -273,8 +305,11 @@ export const Sidebar = () => {
             </div>
             
             <p className="text-xs text-muted-foreground leading-relaxed">
-              Are you sure you want to delete all chat conversations? This action cannot be undone and will permanently erase your chat history.
+              Are you sure you want to delete all your chat conversations? This action cannot be undone and will permanently erase your chat history and layers.
             </p>
+            <div className="text-[11px] text-blue-600 dark:text-blue-400 bg-blue-500/10 border border-blue-500/20 p-2 rounded-md">
+              <span className="font-semibold">Note:</span> Only your own chats and layers will be deleted. Any shared sessions by other users will remain untouched.
+            </div>
 
             <div className="flex items-center justify-end gap-2 pt-2">
               <button

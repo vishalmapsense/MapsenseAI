@@ -14,6 +14,24 @@ import type { ClientToolDefinition } from "@/config/clientTools/types";
 export const NAVIGATION_TOOLS: ClientToolDefinition[] = [
   {
     type: "function",
+    name: "map_toggle_3d",
+    description:
+      "Toggle the map between 2D (top-down) and 3D (tilted pitch) view. Use when the user asks to see the map in 3D, or wants to go back to 2D.",
+    parameters: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["2d", "3d"],
+          description: "Optional mode to set. If not provided, it will toggle the current state.",
+        },
+      },
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
     name: "map_zoom_in",
     description:
       "Zoom in on the map. Use when the user says 'zoom in', 'closer', 'magnify', etc.",

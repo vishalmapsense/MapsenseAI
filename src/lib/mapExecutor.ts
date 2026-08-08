@@ -1,9 +1,15 @@
-import type Map from "ol/Map";
-import { fromLonLat, toLonLat } from "ol/proj";
 import * as turf from "@turf/turf";
 import type { MapCommand } from "@/stores/useMapStore";
 import { useMapStore } from "@/stores/useMapStore";
-import { normalizeToGeoJSON, fetchAndNormalizeSpatialUrl } from "@/utils/spatialNormalizer";
+import {
+  normalizeToGeoJSON,
+  fetchAndNormalizeSpatialUrl,
+} from "@/utils/spatialNormalizer";
+import {
+  saveLayer,
+  deleteAllLayers,
+  extractLayerName,
+} from "@/services/layerSyncService";
 
 export interface CommandResult {
   success: boolean;
@@ -13,15 +19,14 @@ export interface CommandResult {
 }
 
 /**
- * Executes a list of imperative map commands on a given OpenLayers Map instance.
+ * Executes map commands through the declarative Deck.gl map store.
  * Returns an array of execution results that can be used to generate chat messages.
  */
 export const executeClientCommands = async (
-  map: Map,
-  commands: MapCommand[]
+  commands: MapCommand[],
+  sessionId?: string | null,
 ): Promise<CommandResult[]> => {
   const results: CommandResult[] = [];
-  const view = map.getView();
 
   for (const cmd of commands) {
     try {
@@ -29,7 +34,10 @@ export const executeClientCommands = async (
       switch (cmd.type) {
         case "ZOOM_IN": {
           const levels = cmd.payload?.levels || 1;
-          view.animate({ zoom: (view.getZoom() || 0) + levels, duration: 500 });
+          useMapStore.getState().setViewState({ 
+            zoom: (useMapStore.getState().viewState.zoom || 0) + levels, 
+            transitionDuration: 500 
+          });
           results.push({
             success: true,
             code: "SUCCESS",
@@ -39,7 +47,10 @@ export const executeClientCommands = async (
         }
         case "ZOOM_OUT": {
           const levels = cmd.payload?.levels || 1;
-          view.animate({ zoom: (view.getZoom() || 0) - levels, duration: 500 });
+          useMapStore.getState().setViewState({ 
+            zoom: (useMapStore.getState().viewState.zoom || 0) - levels, 
+            transitionDuration: 500 
+          });
           results.push({
             success: true,
             code: "SUCCESS",
@@ -50,7 +61,10 @@ export const executeClientCommands = async (
         case "SET_ZOOM": {
           const zoom = cmd.payload?.zoom;
           if (typeof zoom === "number") {
-            view.animate({ zoom, duration: 500 });
+            useMapStore.getState().setViewState({ 
+              zoom, 
+              transitionDuration: 500 
+            });
             results.push({
               success: true,
               code: "SUCCESS",
@@ -63,9 +77,12 @@ export const executeClientCommands = async (
         }
         case "ROTATE": {
           const degrees = cmd.payload?.degrees || 0;
-          const currentRotation = view.getRotation();
-          const targetRotation = currentRotation + (degrees * Math.PI) / 180;
-          view.animate({ rotation: targetRotation, duration: 500 });
+          const currentRotation = useMapStore.getState().viewState.bearing || 0;
+          const targetRotation = currentRotation + degrees;
+          useMapStore.getState().setViewState({ 
+            bearing: targetRotation, 
+            transitionDuration: 500 
+          });
           results.push({
             success: true,
             code: "SUCCESS",
@@ -74,7 +91,7 @@ export const executeClientCommands = async (
           break;
         }
         case "RESET_ROTATION": {
-          view.animate({ rotation: 0, duration: 500 });
+          useMapStore.getState().setViewState({ bearing: 0, transitionDuration: 500 });
           results.push({
             success: true,
             code: "SUCCESS",
@@ -85,10 +102,11 @@ export const executeClientCommands = async (
         case "FLY_TO": {
           const { lat, lng, zoom } = cmd.payload || {};
           if (typeof lat === "number" && typeof lng === "number") {
-            view.animate({
-              center: fromLonLat([lng, lat]),
-              zoom: zoom || view.getZoom(),
-              duration: 1000,
+            useMapStore.getState().setViewState({
+              longitude: lng,
+              latitude: lat,
+              zoom: zoom || useMapStore.getState().viewState.zoom,
+              transitionDuration: 1000,
             });
             results.push({
               success: true,
@@ -101,8 +119,7 @@ export const executeClientCommands = async (
           break;
         }
         case "FIT_BOUNDS": {
-          // This is typically handled by OpenLayersMap automatically when features are added,
-          // but if called explicitly, it attempts to fit current features.
+          useMapStore.getState().triggerZoomToFit();
           results.push({
             success: true,
             code: "SUCCESS",
@@ -124,8 +141,45 @@ export const executeClientCommands = async (
           }
           break;
         }
+        case "TOGGLE_3D": {
+          const currentViewState = useMapStore.getState().viewState;
+          const is3D = currentViewState.pitch > 0;
+          const mode = cmd.payload?.mode;
+          
+          let targetPitch = is3D ? 0 : 60;
+          let targetBearing = is3D ? 0 : currentViewState.bearing;
+          
+          if (mode === "2d") {
+            targetPitch = 0;
+            targetBearing = 0;
+          } else if (mode === "3d") {
+            targetPitch = 60;
+          }
+
+          useMapStore.getState().setViewState({
+            pitch: targetPitch,
+            bearing: targetBearing,
+            transitionDuration: 500
+          });
+          
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Switched map to ${targetPitch > 0 ? "3D" : "2D"} view.`,
+          });
+          break;
+        }
         case "CLEAR_MAP": {
           useMapStore.getState().setMapFeatures([]);
+          // Persist: delete all layers from Supabase
+          if (sessionId) {
+            deleteAllLayers(sessionId).catch((e) =>
+              console.error(
+                "[MapExecutor] Failed to delete layers from Supabase:",
+                e,
+              ),
+            );
+          }
           results.push({
             success: true,
             code: "SUCCESS",
@@ -148,7 +202,23 @@ export const executeClientCommands = async (
             const normalized = normalizeToGeoJSON(rawGeojson, label);
             if (normalized) {
               const store = useMapStore.getState();
+              const newIndex = store.mapFeatures.length;
               store.setMapFeatures([...store.mapFeatures, normalized]);
+
+              // Persist: save-after-success — layer rendered on map, now persist
+              if (sessionId) {
+                saveLayer(
+                  sessionId,
+                  newIndex,
+                  extractLayerName(normalized) || label,
+                  normalized,
+                ).catch((e) =>
+                  console.error(
+                    "[MapExecutor] Failed to persist layer to Supabase:",
+                    e,
+                  ),
+                );
+              }
 
               results.push({
                 success: true,
@@ -170,7 +240,23 @@ export const executeClientCommands = async (
             const normalized = await fetchAndNormalizeSpatialUrl(url, label);
             if (normalized) {
               const store = useMapStore.getState();
+              const newIndex = store.mapFeatures.length;
               store.setMapFeatures([...store.mapFeatures, normalized]);
+
+              // Persist: save-after-success
+              if (sessionId) {
+                saveLayer(
+                  sessionId,
+                  newIndex,
+                  extractLayerName(normalized) || label,
+                  normalized,
+                ).catch((e) =>
+                  console.error(
+                    "[MapExecutor] Failed to persist URL layer to Supabase:",
+                    e,
+                  ),
+                );
+              }
 
               results.push({
                 success: true,
@@ -178,7 +264,9 @@ export const executeClientCommands = async (
                 message: `Loaded spatial feature from URL.`,
               });
             } else {
-              throw new Error("Could not fetch or parse spatial data from URL.");
+              throw new Error(
+                "Could not fetch or parse spatial data from URL.",
+              );
             }
           } else {
             throw new Error("Missing URL payload.");
@@ -190,16 +278,27 @@ export const executeClientCommands = async (
           const lng = cmd.payload?.lng;
           const label = cmd.payload?.label || "Marker";
           const zoom = cmd.payload?.zoom;
-          
+
           if (typeof lat === "number" && typeof lng === "number") {
-            const pointFeature = turf.point([lng, lat], { 
-              name: label, 
+            const pointFeature = turf.point([lng, lat], {
+              name: label,
               type: "marker",
-              ...(zoom && { zoom })
+              ...(zoom && { zoom }),
             });
-            
+
             const store = useMapStore.getState();
+            const newIndex = store.mapFeatures.length;
             store.setMapFeatures([...store.mapFeatures, pointFeature as any]);
+
+            // Persist: save-after-success
+            if (sessionId) {
+              saveLayer(sessionId, newIndex, label, pointFeature).catch((e) =>
+                console.error(
+                  "[MapExecutor] Failed to persist marker to Supabase:",
+                  e,
+                ),
+              );
+            }
 
             results.push({
               success: true,
@@ -235,7 +334,8 @@ export const executeClientCommands = async (
         case "EDIT_GEOMETRY":
         case "DELETE_GEOMETRY":
         case "SPLIT_POLYGON":
-        case "MERGE_POLYGONS": {
+        case "MERGE_POLYGONS":
+        case "SELECT_LAYER": {
           useMapStore.getState().setInteractionMode(cmd.type);
           results.push({
             success: true,
@@ -254,13 +354,31 @@ export const executeClientCommands = async (
         }
         case "BUFFER_GEOMETRY": {
           const distance = cmd.payload?.distance || 1;
-          const centerProj = view.getCenter();
-          if (centerProj) {
-            const center = toLonLat(centerProj);
-            const bufferFeature = turf.circle(center, distance, { units: 'kilometers' });
-            
+          const { longitude, latitude } = useMapStore.getState().viewState;
+          if (longitude !== undefined && latitude !== undefined) {
+            const center = [longitude, latitude];
+            const bufferFeature = turf.circle(center, distance, {
+              units: "kilometers",
+            });
+
             const store = useMapStore.getState();
+            const newIndex = store.mapFeatures.length;
             store.setMapFeatures([...store.mapFeatures, bufferFeature as any]);
+
+            // Persist: save-after-success
+            if (sessionId) {
+              saveLayer(
+                sessionId,
+                newIndex,
+                `${distance}km Buffer`,
+                bufferFeature,
+              ).catch((e) =>
+                console.error(
+                  "[MapExecutor] Failed to persist buffer to Supabase:",
+                  e,
+                ),
+              );
+            }
 
             results.push({
               success: true,

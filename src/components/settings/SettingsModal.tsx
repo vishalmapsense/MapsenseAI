@@ -21,6 +21,8 @@ import {
   LogOut,
   Copy,
   Trash2,
+  Database,
+  Moon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
@@ -32,7 +34,7 @@ import {
 } from "@/stores/useModelSettingsStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 import { useAuthStore } from "@/stores/useAuthStore";
-import { useChatStore } from "@/stores/useChatStore";
+import { useChatStore, getRecentSharedSessions, type ChatSession } from "@/stores/useChatStore";
 import { Share2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -268,17 +270,19 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type SettingsTab = "general" | "models" | "apikeys" | "theme" | "account" | "chat";
+type SettingsTab = "general" | "models" | "apikeys" | "theme" | "account" | "chat" | "cache";
 
 export function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("models");
   const [chatSubTab, setChatSubTab] = useState<"menu" | "shared">("menu");
   const [isFetchingShares, setIsFetchingShares] = useState(false);
   const [filter, setFilter] = useState<"all" | "free" | "paid">("all");
+  const [cachedShares, setCachedShares] = useState<ChatSession[]>([]);
   const { selectedModelId, setSelectedModel } = useModelSettingsStore();
   const { layout, setLayout } = useSidebarStore();
   const { user, signOut } = useAuthStore();
-  const { mySharedSessions, fetchMySharedSessions, toggleShareStatus, deleteSharedSession } = useChatStore();
+  const { theme, setTheme } = useTheme();
+  const { mySharedSessions, fetchMySharedSessions, toggleShareStatus, deleteSharedSession, sessions, clearSharedSessionCache } = useChatStore();
 
   useEffect(() => {
     if (open && tab === "chat" && chatSubTab === "shared" && user) {
@@ -286,6 +290,21 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
       fetchMySharedSessions().finally(() => setIsFetchingShares(false));
     }
   }, [open, tab, chatSubTab, user, fetchMySharedSessions]);
+
+  const refreshCache = useCallback(() => {
+    setCachedShares(getRecentSharedSessions());
+  }, []);
+
+  useEffect(() => {
+    if (open && tab === "cache") {
+      refreshCache();
+    }
+  }, [open, tab, refreshCache]);
+
+  const handleClearCache = (id?: string) => {
+    clearSharedSessionCache(id);
+    refreshCache();
+  };
 
   // Reset subtab when tab changes
   useEffect(() => {
@@ -319,6 +338,7 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
     { id: "apikeys", label: "API Keys", icon: Key },
     { id: "theme", label: "Appearance", icon: Palette },
     { id: "account", label: "Account", icon: User },
+    { id: "cache", label: "Shared Cache", icon: Database },
   ] as const;
 
   return (
@@ -642,6 +662,59 @@ export function SettingsModal({ open, onClose }: SettingsModalProps) {
                                </button>
                             </div>
                           </div>
+                        </div>
+                      </motion.div>
+                    )}
+
+                    {/* ── Cache Tab ── */}
+                    {tab === "cache" && (
+                      <motion.div
+                        key="cache"
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.15 }}
+                      >
+                        <div className="flex items-center justify-between mb-6">
+                          <div>
+                            <h3 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+                              Cached Shared Sessions
+                            </h3>
+                            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+                              Manage shared chats that are saved locally on your device.
+                            </p>
+                          </div>
+                          {cachedShares.length > 0 && (
+                            <button
+                              onClick={() => handleClearCache()}
+                              className="px-3.5 py-1.5 text-xs font-medium bg-destructive/10 text-destructive hover:bg-destructive hover:text-white rounded-md transition-colors"
+                            >
+                              Clear All
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          {cachedShares.length === 0 ? (
+                            <div className="text-sm text-zinc-500 dark:text-zinc-400 text-center py-8">
+                              No shared sessions are currently cached.
+                            </div>
+                          ) : (
+                            cachedShares.map(session => (
+                              <div key={session.id} className="flex items-center justify-between p-3 rounded-xl border border-zinc-200 dark:border-zinc-800/60 bg-zinc-50/50 dark:bg-zinc-900/30">
+                                <div className="flex flex-col min-w-0">
+                                  <span className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">{session.title}</span>
+                                  <span className="text-[10px] text-zinc-500">{new Date(session.updatedAt).toLocaleDateString()}</span>
+                                </div>
+                                <button
+                                  onClick={() => handleClearCache(session.id)}
+                                  className="p-1.5 text-zinc-400 hover:text-destructive rounded-md hover:bg-destructive/10 transition-colors"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            ))
+                          )}
                         </div>
                       </motion.div>
                     )}

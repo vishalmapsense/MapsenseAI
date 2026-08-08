@@ -11,6 +11,7 @@ import { SchemaType, type FunctionDeclaration } from "@google/generative-ai";
 import { NAVIGATION_TOOLS } from "./navigation";
 import { LAYER_TOOLS } from "./layers";
 import { DRAWING_TOOLS } from "./drawing";
+import { INTERACTION_TOOLS } from "./interaction";
 import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "@/config/clientTools/types";
 import type { MCPTool } from "@/types/mcp.types";
 
@@ -20,6 +21,7 @@ export const CLIENT_TOOL_DEFINITIONS: ClientToolDefinition[] = [
   ...NAVIGATION_TOOLS,
   ...LAYER_TOOLS,
   ...DRAWING_TOOLS,
+  ...INTERACTION_TOOLS,
 ];
 
 // ─── JSON Schema → Gemini Schema Converter ────────────────────
@@ -138,4 +140,5 @@ export function buildClientToolResponse(
 export { NAVIGATION_TOOLS } from "./navigation";
 export { LAYER_TOOLS } from "./layers";
 export { DRAWING_TOOLS } from "./drawing";
+export { INTERACTION_TOOLS } from "./interaction";
 export type { ClientToolDefinition } from "./types";

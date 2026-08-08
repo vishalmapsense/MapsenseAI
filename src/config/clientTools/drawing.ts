@@ -108,7 +108,7 @@ export const DRAWING_TOOLS: ClientToolDefinition[] = [
   {
     type: "function",
     name: "map_delete_geometry",
-    description: "Activate geometry deletion mode. Allows the user to select and delete shapes.",
+    description: "Activate geometry deletion mode. Allows the user to select and delete shapes. CRITICAL: This is a DESTRUCTIVE action. You MUST call `request_user_permission` tool FIRST to get explicit user consent before returning this tool. Do NOT call this tool without user permission.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     strict: true
   },
@@ -146,6 +146,15 @@ export const DRAWING_TOOLS: ClientToolDefinition[] = [
     type: "function",
     name: "map_merge_polygons",
     description: "Merge selected polygons into one.",
+    parameters: { type: "object", properties: {}, additionalProperties: false },
+    strict: true
+  },
+
+  // Layer Selection Mode
+  {
+    type: "function",
+    name: "map_select_layer",
+    description: "Activate layer selection mode. User can click features on the map or from the layers panel to select boundary/region layers. Selected layers will be attached to the user's next message as polygon context for boundary-based queries (e.g., searching amenities within a region). Use this when the user wants to search/query WITHIN a specific boundary but hasn't provided one.",
     parameters: { type: "object", properties: {}, additionalProperties: false },
     strict: true
   }

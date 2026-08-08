@@ -15,7 +15,7 @@ export const LAYER_TOOLS: ClientToolDefinition[] = [
     type: "function",
     name: "map_clear_layers",
     description:
-      "Remove all data layers from the map. Use when the user says 'clear the map', 'remove all layers', 'start fresh', etc.",
+      "Remove all data layers from the map. Use when the user says 'clear the map', 'remove all layers', 'start fresh', etc. CRITICAL: This is a DESTRUCTIVE action. You MUST call `request_user_permission` tool FIRST to get explicit user consent before returning this tool. Do NOT call this tool without user permission.",
     parameters: {
       type: "object",
       properties: {},

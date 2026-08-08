@@ -13,12 +13,47 @@ import { ChatMessage } from "@/types/mcp.types";
 import { toast } from "sonner";
 import { useMapStore } from "./useMapStore";
 import { executeClientCommands } from "@/lib/mapExecutor";
+import { fetchSessionLayers, deleteAllLayers, setSessionLayersCache } from "@/services/layerSyncService";
 
 export interface ChatSession {
   id: string;
   title: string;
   messages: ChatMessage[];
   updatedAt: number;
+}
+
+const RECENT_SHARED_KEY = "mapsense_recent_shared_sessions";
+
+export function getRecentSharedSessions(): ChatSession[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return JSON.parse(localStorage.getItem(RECENT_SHARED_KEY) || "[]");
+  } catch (e) {
+    return [];
+  }
+}
+
+function saveRecentSharedSession(session: ChatSession) {
+  if (typeof window === "undefined") return;
+  const existing = getRecentSharedSessions();
+  const filtered = existing.filter((s) => s.id !== session.id);
+  // Keep basic info (no messages) to save space
+  filtered.unshift({ id: session.id, title: session.title, messages: [], updatedAt: session.updatedAt });
+  localStorage.setItem(RECENT_SHARED_KEY, JSON.stringify(filtered.slice(0, 10))); // Keep last 10
+}
+
+export function clearRecentSharedSessions() {
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(RECENT_SHARED_KEY);
+  }
+}
+
+export function removeRecentSharedSession(sessionId: string) {
+  if (typeof window !== "undefined") {
+    const existing = getRecentSharedSessions();
+    const filtered = existing.filter((s) => s.id !== sessionId);
+    localStorage.setItem(RECENT_SHARED_KEY, JSON.stringify(filtered));
+  }
 }
 
 export interface SharedSessionRecord {
@@ -42,6 +77,7 @@ interface ChatState {
   isTransparentMode: boolean;
   userLocation: { lat: number; lng: number } | null;
   mySharedSessions: SharedSessionRecord[];
+  selectedLayersForChat: any[];
 
   sendMessage: (text: string) => Promise<void>;
   editAndResendMessage: (messageId: string, newText: string) => Promise<void>;
@@ -55,6 +91,7 @@ interface ChatState {
   fetchSessions: () => Promise<void>;
   loadSessionHistory: (sessionId: string) => Promise<void>;
   loadSharedSession: (shareId: string) => Promise<void>;
+  clearSharedSessionCache: (sessionId?: string) => void;
   deleteSession: (sessionId: string) => Promise<void>;
   deleteAllSessions: () => void;
   renameSession: (sessionId: string, newTitle: string) => void;
@@ -63,6 +100,11 @@ interface ChatState {
   toggleShareStatus: (shareToken: string, isPublic: boolean) => Promise<void>;
   shareSession: (sessionId: string, title?: string) => Promise<string | null>;
   deleteSharedSession: (shareToken: string) => Promise<void>;
+  addSelectedLayer: (layer: any) => void;
+  clearSelectedLayers: () => void;
+
+  permissionRequest: { title: string; message: string; options: string[] } | null;
+  clearPermissionRequest: () => void;
 }
 
 function generateId(): string {
@@ -99,6 +141,10 @@ export const useChatStore = create<ChatState>((set, get) => {
   isTransparentMode: false,
   userLocation: null,
   mySharedSessions: [],
+  selectedLayersForChat: [],
+  permissionRequest: null,
+
+  clearPermissionRequest: () => set({ permissionRequest: null }),
 
   sendMessage: async (text: string) => {
     const auth = useAuthStore.getState();
@@ -109,6 +155,11 @@ export const useChatStore = create<ChatState>((set, get) => {
 
     const currentState = get();
     if (!text.trim() || currentState.isLoading) return;
+
+    if (currentState.activeSessionId?.startsWith("shared-")) {
+      toast.error("You are not allowed to do that. Shared sessions are read-only.");
+      return;
+    }
 
     // Ensure we have location before sending if possible (wait max 3 seconds)
     if (!currentState.userLocation) {
@@ -275,20 +326,36 @@ export const useChatStore = create<ChatState>((set, get) => {
         throw new Error("Did not receive final result from server.");
       }
 
-      toast.success("Received response");
+      // Show agent-level errors as distinct toast notifications
+      if (finalData.errors && Array.isArray(finalData.errors) && finalData.errors.length > 0) {
+        for (const err of finalData.errors) {
+          toast.error(`Agent Error (${err.agent})`, {
+            description: err.message.length > 150 ? err.message.substring(0, 150) + "..." : err.message,
+            duration: 8000,
+          });
+        }
+        console.warn("⚠️ [ChatStore] Agent errors received:", finalData.errors);
+      } else {
+        toast.success("Received response");
+      }
 
       console.log("💬 [ChatStore] Received finalData from server:", finalData);
 
       let executionMessages: string[] = [];
       // Execute client tool commands directly (zoom, rotate, etc.) and collect validation results
       if (finalData.clientToolCommands && Array.isArray(finalData.clientToolCommands) && finalData.clientToolCommands.length > 0) {
-        console.log("🛠️ [ChatStore] Executing clientToolCommands:", finalData.clientToolCommands);
-        const map = useMapStore.getState().mapInstance;
-        if (map) {
-          const results = await executeClientCommands(map, finalData.clientToolCommands);
+        // INTERCEPT REQUEST_PERMISSION
+        const permissionCmd = finalData.clientToolCommands.find((cmd: any) => cmd.type === "REQUEST_PERMISSION");
+        if (permissionCmd && permissionCmd.payload) {
+            set({ permissionRequest: permissionCmd.payload });
+        }
+
+        const commandsToExecute = finalData.clientToolCommands.filter((cmd: any) => cmd.type !== "REQUEST_PERMISSION");
+
+        if (commandsToExecute.length > 0) {
+          console.log("🛠️ [ChatStore] Executing clientToolCommands:", commandsToExecute);
+          const results = await executeClientCommands(commandsToExecute, get().activeSessionId);
           executionMessages = results.map(r => r.success ? `✅ ${r.message}` : `❌ ${r.message}`);
-        } else {
-          executionMessages = [`❌ Failed to execute map actions: Map instance not ready.`];
         }
       }
 
@@ -435,11 +502,22 @@ export const useChatStore = create<ChatState>((set, get) => {
   toggleMinimize: () => set((state) => ({ isChatMinimized: !state.isChatMinimized })),
   toggleTransparentMode: () => set((state) => ({ isTransparentMode: !state.isTransparentMode })),
   
-  setActiveSession: (id: string) => set((state) => {
+  setActiveSession: (id: string) => {
+    const state = get();
     const session = state.sessions.find(s => s.id === id);
-    if (!session) return state;
-    return { activeSessionId: id, messages: session.messages, error: null, isChatOpen: true, isChatMinimized: false };
-  }),
+    if (!session) return;
+    set({ activeSessionId: id, messages: session.messages, error: null, isChatOpen: true, isChatMinimized: false });
+    // Load layers for this session and render on map
+    fetchSessionLayers(id).then((layers) => {
+      if (layers.length > 0) {
+        useMapStore.getState().setMapFeatures(layers);
+        useMapStore.getState().triggerZoomToFit();
+        console.log(`[ChatStore] Loaded ${layers.length} persisted layers for session ${id}`);
+      } else {
+        useMapStore.getState().setMapFeatures([]);
+      }
+    });
+  },
   
   createNewSession: () => {
     const auth = useAuthStore.getState();
@@ -455,6 +533,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         messages: [],
         updatedAt: Date.now()
       };
+      // Clear map when creating a new session
+      useMapStore.getState().setMapFeatures([]);
       return {
         sessions: [newSession, ...state.sessions],
         activeSessionId: newSession.id,
@@ -467,9 +547,16 @@ export const useChatStore = create<ChatState>((set, get) => {
   },
 
   fetchSessions: async () => {
+    const auth = useAuthStore.getState();
+    if (!auth.user) return;
+
     try {
-      const res = await fetch("/api/adk-chat/sessions");
-      const data = await res.json();
+      const fetchPromise = fetch("/api/adk-chat/sessions").then(async res => {
+        if (!res.ok) throw new Error("Failed to fetch sessions");
+        return res.json();
+      });
+
+      const data = await fetchPromise;
       if (data.sessions && Array.isArray(data.sessions)) {
         set((state) => {
           const mergedSessions: ChatSession[] = data.sessions.map((s: any) => {
@@ -481,7 +568,13 @@ export const useChatStore = create<ChatState>((set, get) => {
               updatedAt: s.updatedAt || Date.now(),
             };
           });
-          return { sessions: mergedSessions };
+          
+          // Merge in recently viewed shared sessions from local storage
+          const recentShared = getRecentSharedSessions();
+          // Filter out any shared sessions already in the list (just in case)
+          const newShared = recentShared.filter(rs => !mergedSessions.find(ms => ms.id === rs.id));
+          
+          return { sessions: [...mergedSessions, ...newShared] };
         });
         
         // Auto-load latest session if no active session is set
@@ -492,10 +585,41 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
     } catch (e) {
       console.error("Failed to fetch ADK sessions:", e);
+      toast.error("Failed to fetch chat history");
     }
   },
 
   loadSessionHistory: async (sessionId: string) => {
+    const state = get();
+    
+    // Redirect to shared session loading if this is a shared session ID
+    if (sessionId.startsWith("shared-")) {
+      const shareId = sessionId.replace("shared-", "");
+      return get().loadSharedSession(shareId);
+    }
+    
+    const existingSession = state.sessions.find(s => s.id === sessionId);
+    
+    // Serve from cache if messages are already loaded
+    if (existingSession && existingSession.messages && existingSession.messages.length > 0) {
+      console.log(`[ChatStore] ⚡ Serving chat from cache for session ${sessionId}`);
+      set({ 
+        isLoading: true, 
+        activeSessionId: sessionId,
+        messages: existingSession.messages,
+        isChatOpen: true,
+        isChatMinimized: false
+      });
+      
+      const layers = await fetchSessionLayers(sessionId);
+      useMapStore.getState().setMapFeatures(layers.length > 0 ? layers : []);
+      if (layers.length > 0) useMapStore.getState().triggerZoomToFit();
+      
+      set({ isLoading: false });
+      return;
+    }
+
+    const toastId = toast.loading("Loading session...");
     set({ isLoading: true, activeSessionId: sessionId });
     try {
       const res = await fetch(`/api/adk-chat/sessions/${sessionId}`);
@@ -514,24 +638,70 @@ export const useChatStore = create<ChatState>((set, get) => {
             isChatMinimized: false,
           };
         });
+
+        // Load persisted layers for this session and render on map
+        const layers = await fetchSessionLayers(sessionId);
+        if (layers.length > 0) {
+          useMapStore.getState().setMapFeatures(layers);
+          useMapStore.getState().triggerZoomToFit();
+          console.log(`[ChatStore] Loaded ${layers.length} persisted layers for session ${sessionId}`);
+        } else {
+          useMapStore.getState().setMapFeatures([]);
+        }
+        toast.success("Session loaded successfully", { id: toastId });
       } else {
         set({ isLoading: false });
+        useMapStore.getState().setMapFeatures([]);
+        toast.error("Failed to load session data", { id: toastId });
       }
     } catch (e) {
       console.error("Failed to load ADK session history:", e);
       set({ isLoading: false });
+      toast.error("Error loading session", { id: toastId });
     }
   },
 
   loadSharedSession: async (shareId: string) => {
+    const sessionId = `shared-${shareId}`;
+    const state = get();
+    const existingSession = state.sessions.find(s => s.id === sessionId);
+
+    // Serve from cache if messages are already loaded
+    if (existingSession && existingSession.messages && existingSession.messages.length > 0) {
+      console.log(`[ChatStore] ⚡ Serving shared chat from cache for session ${sessionId}`);
+      set({ 
+        isLoading: true, 
+        activeSessionId: sessionId,
+        messages: existingSession.messages,
+        isChatOpen: true,
+        isChatMinimized: false
+      });
+      
+      const layers = await fetchSessionLayers(sessionId);
+      useMapStore.getState().setMapFeatures(layers.length > 0 ? layers : []);
+      if (layers.length > 0) useMapStore.getState().triggerZoomToFit();
+      
+      set({ isLoading: false });
+      return;
+    }
+
+    const toastId = toast.loading("Loading shared session...");
     set({ isLoading: true });
     try {
       const res = await fetch(`/api/adk-chat/share/${shareId}`);
       const data = await res.json();
       if (data.messages) {
+        const sessionId = `shared-${shareId}`;
+
+        const sessionToSave = {
+          id: sessionId,
+          title: data.title || "Shared Chat",
+          messages: [],
+          updatedAt: data.updatedAt || Date.now(),
+        };
+        saveRecentSharedSession(sessionToSave);
+
         set((state) => {
-          // Add as temporary session if not exists
-          const sessionId = `shared-${shareId}`;
           const existingSession = state.sessions.find(s => s.id === sessionId);
           
           let updatedSessions = state.sessions;
@@ -560,12 +730,42 @@ export const useChatStore = create<ChatState>((set, get) => {
             isChatMinimized: false,
           };
         });
+
+        // Load shared session layers if available
+        if (data.layers && Array.isArray(data.layers) && data.layers.length > 0) {
+          setSessionLayersCache(sessionId, data.layers);
+          useMapStore.getState().setMapFeatures(data.layers);
+          useMapStore.getState().triggerZoomToFit();
+          console.log(`[ChatStore] Loaded ${data.layers.length} layers for shared session ${shareId}`);
+        } else {
+          setSessionLayersCache(sessionId, []);
+          useMapStore.getState().setMapFeatures([]);
+        }
+        toast.success("Shared session loaded", { id: toastId });
       } else {
         set({ isLoading: false });
+        toast.error("Failed to load shared session data", { id: toastId });
       }
     } catch (e) {
       console.error("Failed to load shared session:", e);
       set({ isLoading: false });
+      toast.error("Error loading shared session", { id: toastId });
+    }
+  },
+
+  clearSharedSessionCache: (sessionId?: string) => {
+    if (sessionId) {
+      removeRecentSharedSession(sessionId);
+      set((state) => ({
+        sessions: state.sessions.filter((s) => s.id !== sessionId)
+      }));
+      toast.success("Shared session cleared from cache");
+    } else {
+      clearRecentSharedSessions();
+      set((state) => ({
+        sessions: state.sessions.filter((s) => !s.id.startsWith("shared-"))
+      }));
+      toast.success("All shared sessions cleared from cache");
     }
   },
 
@@ -576,9 +776,26 @@ export const useChatStore = create<ChatState>((set, get) => {
       return;
     }
 
+    if (sessionId.startsWith("shared-")) {
+      toast.error("Shared sessions cannot be deleted.");
+      return;
+    }
+
     try {
-      const res = await fetch(`/api/adk-chat/sessions/${sessionId}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error("Failed to delete session");
+      const deletePromise = (async () => {
+        // Delete layers from Supabase first (cascade)
+        await deleteAllLayers(sessionId);
+        const res = await fetch(`/api/adk-chat/sessions/${sessionId}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error("Failed to delete session");
+      })();
+
+      toast.promise(deletePromise, {
+        loading: "Deleting session...",
+        success: "Session deleted successfully",
+        error: "Failed to delete session",
+      });
+
+      await deletePromise;
       
       set((state) => {
         const filtered = state.sessions.filter(s => s.id !== sessionId);
@@ -613,10 +830,28 @@ export const useChatStore = create<ChatState>((set, get) => {
     }
 
     try {
-      const res = await fetch(`/api/adk-chat/sessions/all`, { method: 'DELETE' });
-      if (!res.ok) throw new Error("Failed to delete all sessions");
+      // Delete layers for owned sessions first
+      const sharedSessions = get().sessions.filter(s => s.id.startsWith("shared-"));
+      const ownedSessions = get().sessions.filter(s => !s.id.startsWith("shared-"));
+
+      const deletePromise = (async () => {
+        await Promise.all(
+          ownedSessions.map(s => deleteAllLayers(s.id).catch(() => {}))
+        );
+        const res = await fetch(`/api/adk-chat/sessions/all`, { method: 'DELETE' });
+        if (!res.ok) throw new Error("Failed to delete all sessions");
+      })();
+
+      toast.promise(deletePromise, {
+        loading: "Clearing all chats...",
+        success: "All your chats have been cleared",
+        error: "Failed to clear chats",
+      });
+
+      await deletePromise;
       
-      set({ sessions: [], activeSessionId: null, messages: [] });
+      useMapStore.getState().setMapFeatures([]);
+      set({ sessions: sharedSessions, activeSessionId: null, messages: [] });
       get().createNewSession();
     } catch (err: any) {
       console.error("Delete all sessions error:", err);
@@ -624,20 +859,38 @@ export const useChatStore = create<ChatState>((set, get) => {
   },
 
   renameSession: async (sessionId: string, newTitle: string) => {
+    if (sessionId.startsWith("shared-")) {
+      toast.error("Shared sessions cannot be renamed.");
+      return;
+    }
+
     // 1. Optimistic UI update
     set((state) => ({
       sessions: state.sessions.map((s) =>
         s.id === sessionId ? { ...s, title: newTitle } : s
       ),
+      mySharedSessions: state.mySharedSessions.map((s) =>
+        s.session_id === sessionId ? { ...s, title: newTitle } : s
+      ),
     }));
 
     // 2. Persist in database
     try {
-      await fetch(`/api/adk-chat/sessions/${sessionId}`, {
+      const renamePromise = fetch(`/api/adk-chat/sessions/${sessionId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: newTitle }),
+      }).then(res => {
+        if (!res.ok) throw new Error("Failed to rename");
       });
+
+      toast.promise(renamePromise, {
+        loading: "Renaming chat...",
+        success: "Chat renamed successfully",
+        error: "Failed to rename chat",
+      });
+
+      await renamePromise;
     } catch (err) {
       console.error("Failed to persist session rename:", err);
     }
@@ -736,5 +989,20 @@ export const useChatStore = create<ChatState>((set, get) => {
       console.error("Failed to delete shared session:", err);
     }
   },
+  addSelectedLayer: (layer: any) => {
+    set((state) => {
+      // Toggle: if already selected (by reference match on first feature), remove it
+      const firstFeatId = JSON.stringify(layer?.features?.[0]?.geometry);
+      const alreadyIdx = state.selectedLayersForChat.findIndex(
+        (l) => JSON.stringify(l?.features?.[0]?.geometry) === firstFeatId
+      );
+      if (alreadyIdx !== -1) {
+        return { selectedLayersForChat: state.selectedLayersForChat.filter((_, i) => i !== alreadyIdx) };
+      }
+      return { selectedLayersForChat: [...state.selectedLayersForChat, layer] };
+    });
+  },
+
+  clearSelectedLayers: () => set({ selectedLayersForChat: [] }),
   };
 });

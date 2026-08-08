@@ -188,8 +188,8 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
   }
 
   // 4. Single GeoJSON Feature ({ type: "Feature", geometry: ... })
-  if (data.type === "Feature") {
-    let feature = { ...data };
+  if (data.type === "Feature" || (data.geometry && data.properties && !data.type)) {
+    let feature = { type: "Feature", ...data };
     if (typeof feature.geometry === "string") {
       const coords = decodePolyline(feature.geometry);
       if (coords.length > 0) {
@@ -272,8 +272,9 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
             coordinates: data.coordinates,
           },
           properties: { 
-            name: defaultLabel,
-            id: data.id || undefined 
+            ...data,
+            coordinates: undefined, // do not duplicate geometry in properties
+            name: data.name || data.title || data.officeName || data.zipcode || defaultLabel,
           },
         },
       ],
