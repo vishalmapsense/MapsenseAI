@@ -78,6 +78,13 @@ export async function DELETE(
     const userId = user.email || user.id;
 
     if (sessionId === "all") {
+      // Delete layers for all sessions first
+      const { error: layerDeleteError } = await supabase
+        .from("session_layers")
+        .delete()
+        .eq("user_id", userId);
+      if (layerDeleteError) console.error("Failed to delete all session layers:", layerDeleteError);
+
       // Fetch all sessions to delete them individually (ADK does not provide deleteAll)
       const response = await globalSessionService.listSessions({
         appName: "MapsenseADK",
@@ -93,6 +100,14 @@ export async function DELETE(
       }
       return NextResponse.json({ success: true, message: "All sessions deleted" });
     } else {
+      // Delete layers for this specific session
+      const { error: layerDeleteError } = await supabase
+        .from("session_layers")
+        .delete()
+        .eq("user_id", userId)
+        .eq("session_id", sessionId);
+      if (layerDeleteError) console.error("Failed to delete session layers:", layerDeleteError);
+
       await globalSessionService.deleteSession({
         appName: "MapsenseADK",
         userId,
@@ -149,6 +164,16 @@ export async function PATCH(
         }
       } as any
     });
+
+    // Also update the title in the shared_sessions table if this session was shared
+    const { error: sharedError } = await supabase
+      .from("shared_sessions")
+      .update({ title })
+      .eq("session_id", sessionId);
+
+    if (sharedError) {
+      console.warn("Failed to update shared session title:", sharedError);
+    }
 
     return NextResponse.json({ success: true, title });
   } catch (error: any) {

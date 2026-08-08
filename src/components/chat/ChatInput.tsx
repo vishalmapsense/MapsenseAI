@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect } from "react";
-import { ArrowUp, Plus, Mic, ChevronUp, Check } from "lucide-react";
+import { ArrowUp, Plus, Mic, ChevronUp, Check, X, Layers } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/useChatStore";
+import { useMapStore } from "@/stores/useMapStore";
 import { Spinner } from "@/components/ui/spinner";
 import { useModelSettingsStore, ALL_MODELS } from "@/stores/useModelSettingsStore";
 import { motion, AnimatePresence } from "framer-motion";
@@ -87,7 +88,20 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
   const recognitionRef = useRef<any>(null);
   const originalValueRef = useRef("");
   
-  const { sendMessage, isLoading } = useChatStore();
+  const { sendMessage, isLoading, selectedLayersForChat, addSelectedLayer, clearSelectedLayers } = useChatStore();
+  const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
+
+  // Close plus menu on outside click
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (plusMenuRef.current && !plusMenuRef.current.contains(event.target as Node)) {
+        setShowPlusMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
 
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
@@ -186,8 +200,24 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
       textareaRef.current.style.height = "auto";
     }
 
-    await sendMessage(trimmed);
-  }, [value, isLoading, sendMessage, isRecording]);
+    // Build message with attached boundary context if layers are selected
+    let finalMessage = trimmed;
+    if (selectedLayersForChat.length > 0) {
+      const boundaryParts = selectedLayersForChat.map((layer: any, i: number) => {
+        const name = layer?.features?.[0]?.properties?.name || layer?.features?.[0]?.properties?.title || `Layer ${i + 1}`;
+        return `Layer: "${name}", Type: ${layer.type}, Features: ${layer.features?.length || 0}\nGeoJSON: ${JSON.stringify(layer)}`;
+      });
+      finalMessage += `\n\n[ATTACHED_BOUNDARY_CONTEXT]\n${boundaryParts.join("\n---\n")}\n[/ATTACHED_BOUNDARY_CONTEXT]`;
+      clearSelectedLayers();
+      // Exit select mode if still active
+      const currentMode = useMapStore.getState().interactionMode;
+      if (currentMode === "SELECT_LAYER") {
+        useMapStore.getState().setInteractionMode(null);
+      }
+    }
+
+    await sendMessage(finalMessage);
+  }, [value, isLoading, sendMessage, isRecording, selectedLayersForChat, clearSelectedLayers]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -206,6 +236,31 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
     <div className="w-full z-20 pointer-events-none px-2 pb-2">
       <div className={`relative flex flex-col w-full rounded-[20px] bg-background border ${isRecording ? 'border-red-500/50 shadow-red-500/10' : 'border-border/50'} shadow-md focus-within:shadow-lg focus-within:border-border pointer-events-auto p-2 transition-all`}>
         
+        {/* Selected Layers Chips */}
+        {selectedLayersForChat.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 px-2 pb-1.5">
+            {selectedLayersForChat.map((layer: any, i: number) => {
+              const name = layer?.features?.[0]?.properties?.name || layer?.features?.[0]?.properties?.title || `Layer ${i + 1}`;
+              return (
+                <span
+                  key={i}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium bg-green-500/10 text-green-700 dark:text-green-400 border border-green-500/30 rounded-full"
+                >
+                  <Layers className="w-3 h-3" />
+                  {name}
+                  <button
+                    type="button"
+                    onClick={() => addSelectedLayer(layer)}
+                    className="hover:text-red-500 transition-colors ml-0.5"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {/* Input */}
         <Textarea
           ref={textareaRef}
@@ -223,13 +278,40 @@ export const ChatInput = ({ isSplit = false }: { isSplit?: boolean }) => {
         <div className="flex items-center justify-between w-full mt-1">
           {/* Left side actions */}
           <div className="flex items-center gap-1">
-            <button
-              type="button"
-              title="Attach file"
-              className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-full transition-colors shrink-0"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
+            <div className="relative" ref={plusMenuRef}>
+              <button
+                type="button"
+                title="Attach"
+                onClick={() => setShowPlusMenu(!showPlusMenu)}
+                className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-muted/50 rounded-full transition-colors shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+              </button>
+
+              <AnimatePresence>
+                {showPlusMenu && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ duration: 0.15 }}
+                    className="absolute bottom-full left-0 mb-2 w-44 bg-background border border-border shadow-xl rounded-xl p-1 z-50 flex flex-col gap-0.5"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        useMapStore.getState().setInteractionMode("SELECT_LAYER");
+                        setShowPlusMenu(false);
+                      }}
+                      className="flex items-center gap-2 w-full text-left px-3 py-2 text-xs rounded-lg hover:bg-muted/50 text-foreground transition-colors"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      Select Layer
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
 
             <ModelSelector />
           </div>

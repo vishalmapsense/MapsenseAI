@@ -56,10 +56,21 @@ export async function GET(
       }
     }
 
+    // Fetch layers for the shared session
+    const { data: layerRecords } = await supabase
+      .from("session_layers")
+      .select("geojson, layer_index")
+      .eq("user_id", shareRecord.user_id)
+      .eq("session_id", shareRecord.session_id)
+      .order("layer_index", { ascending: true });
+
+    const layers = (layerRecords || []).map((l: any) => l.geojson);
+
     return NextResponse.json({
       success: true,
       title: shareRecord.title || session.state?.title || "Shared Chat",
       messages,
+      layers,
       updatedAt: session.lastUpdateTime || Date.now()
     });
 

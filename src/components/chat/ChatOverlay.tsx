@@ -8,6 +8,7 @@ import { useModelSettingsStore } from "@/stores/useModelSettingsStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { ChatMessageList } from "./ChatMessageList";
+import { PermissionModal } from "./PermissionModal";
 
 export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
   const { isChatOpen, setChatOpen, isChatMinimized, toggleMinimize, isTransparentMode, toggleTransparentMode, messages, initUserLocation } = useChatStore();
@@ -104,6 +105,7 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
                   ? 'h-[80vh] max-h-[90vh] transition-all duration-300 delay-500' // Delayed height increase
                   : 'h-[60vh] sm:h-[50vh] max-h-[600px] transition-all duration-300 delay-0' // Immediate height decrease
                 }`}>
+                <PermissionModal />
                 <ChatMessageList messages={messages} aiName={aiName} />
               </div>
             </motion.div>

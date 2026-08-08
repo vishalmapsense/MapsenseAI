@@ -119,6 +119,7 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   map_load_url: "LOAD_URL",
   map_split_polygon: "SPLIT_POLYGON",
   map_merge_polygons: "MERGE_POLYGONS",
+  request_user_permission: "REQUEST_PERMISSION",
 };
 
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────
