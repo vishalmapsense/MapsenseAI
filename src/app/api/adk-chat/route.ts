@@ -21,10 +21,22 @@ import {
 } from "@/utils/spatialNormalizer";
 import { callMCPProcess } from "@/app/api/mcp/handlers/mapboxHandler";
 
-const resolveMcpResource = async (uri: string) => {
+const createMcpResourceResolver = (mcpToolsetRef?: any) => async (uri: string) => {
   try {
     console.log("🔍 [ADK Route] Resolving MCP resource URI:", uri);
-    const mcpResult: any = await callMCPProcess("resources/read", { uri });
+    let mcpResult: any;
+    
+    const clients = mcpToolsetRef?.mcpSessionManager?.getActiveSessions?.() || [];
+    const localClient = clients[0];
+    
+    if (localClient) {
+      console.log("⚡ [ADK Route] Using local MCP client from toolset");
+      mcpResult = await localClient.readResource({ uri });
+    } else {
+      console.log("⚡ [ADK Route] Using global MCP client via callMCPProcess");
+      mcpResult = await callMCPProcess("resources/read", { uri });
+    }
+
     console.log(
       "🔍 [ADK Route] MCP readResource Result:",
       JSON.stringify(mcpResult, null, 2),
@@ -174,6 +186,8 @@ export async function POST(req: NextRequest) {
         const { rootAgent, mapboxMcpToolset, spatialDataBuffer } =
           await createADKAgent(apiKey, lastMessage, spatialBuffer);
         mcpToolsetRef = mapboxMcpToolset;
+        
+        const resolveMcpResource = createMcpResourceResolver(mcpToolsetRef);
 
         const runner = new Runner({
           appName: "MapsenseADK",

@@ -18,8 +18,13 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 // ─── Global Singleton for MCP Client ─────────────────────────
 
-let mcpClient: Client | null = (globalThis as any)._mcpClient || null;
-
+if ((globalThis as any)._mcpClient) {
+  try {
+    (globalThis as any)._mcpClient.close();
+  } catch(e) {}
+  (globalThis as any)._mcpClient = null;
+}
+let mcpClient: Client | null = null;
 async function getMcpClient(): Promise<Client> {
   if (mcpClient) {
     // Health check: try a lightweight ping to see if the process is still alive
