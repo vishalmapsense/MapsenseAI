@@ -4,16 +4,21 @@ import React from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Minimize2, Maximize2, PanelLeft, AppWindow, Ghost } from "lucide-react";
 import { useChatStore } from "@/stores/useChatStore";
-import { useModelSettingsStore } from "@/stores/useModelSettingsStore";
+import { useModelSettingsStore, ALL_MODELS } from "@/stores/useModelSettingsStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { ChatMessageList } from "./ChatMessageList";
 import { PermissionModal } from "./PermissionModal";
 
 export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
+  const [mounted, setMounted] = React.useState(false);
   const { isChatOpen, setChatOpen, isChatMinimized, toggleMinimize, isTransparentMode, toggleTransparentMode, messages, initUserLocation } = useChatStore();
   const { getSelectedModel } = useModelSettingsStore();
   const { layout, setLayout } = useSidebarStore();
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Request user location once when chat becomes visible
   React.useEffect(() => {
@@ -22,7 +27,8 @@ export const ChatOverlay = ({ isSplit = false }: { isSplit?: boolean }) => {
     }
   }, [isChatOpen, initUserLocation]);
 
-  const model = getSelectedModel();
+  const defaultModel = ALL_MODELS.find(m => m.id === "gemini-3.5-flash") || ALL_MODELS[0];
+  const model = mounted ? (getSelectedModel() || defaultModel) : defaultModel;
   const aiName = model ? model.name.split(" ")[0] : "AI"; // e.g., "Gemini", "Llama", "GPT-4o"
 
   return (

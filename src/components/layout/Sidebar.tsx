@@ -11,12 +11,13 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { SettingsModal } from "@/components/settings/SettingsModal";
 import { useChatStore } from "@/stores/useChatStore";
+import { useModelSettingsStore } from "@/stores/useModelSettingsStore";
 import { toast } from "sonner";
 export const Sidebar = () => {
   const { isCollapsed, toggleCollapse, isMobileOpen, setMobileOpen } = useSidebarStore();
   const { setChatOpen, sessions, activeSessionId, setActiveSession, createNewSession, fetchSessions, loadSessionHistory, deleteSession, deleteAllSessions, renameSession, shareSession, mySharedSessions, fetchMySharedSessions } = useChatStore();
   const { user, signInWithGoogle, signOut, isLoading: authLoading } = useAuthStore();
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { isSettingsOpen: settingsOpen, setSettingsOpen } = useModelSettingsStore();
   const [isDeleteAllModalOpen, setIsDeleteAllModalOpen] = useState(false);
 
   // Prevent hydration mismatch on initial render with persistent state

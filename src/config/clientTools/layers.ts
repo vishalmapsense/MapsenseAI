@@ -69,17 +69,17 @@ export const LAYER_TOOLS: ClientToolDefinition[] = [
     type: "function",
     name: "map_load_url",
     description:
-      "Fetch GeoJSON data from any remote URL (e.g., a public API endpoint, an external data link, or any valid HTTP/HTTPS URL provided explicitly by the user) and display it on the map. DO NOT use this for URIs returned by MCP tools (like mapbox://temp/...) — the system renders those automatically.",
+      "Fetch GeoJSON data from any remote URL (HTTP/HTTPS) or local file path (e.g., from [ATTACHED_LOCAL_FILES]) and display it on the map. DO NOT use this for URIs returned by MCP tools (like mapbox://temp/...) — the system renders those automatically.",
     parameters: {
       type: "object",
       properties: {
         url: {
           type: "string",
-          description: "The full HTTP/HTTPS URL pointing to a GeoJSON resource.",
+          description: "The full HTTP/HTTPS URL or local file path pointing to a GeoJSON resource.",
         },
         label: {
           type: "string",
-          description: "Optional label describing what this data represents (e.g., 'India Boundary', 'Route Layer').",
+          description: "Optional label describing what this data represents (e.g., 'Kings Park POI', 'Toilet Map').",
         },
       },
       required: ["url"],

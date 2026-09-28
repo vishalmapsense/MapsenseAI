@@ -21,24 +21,24 @@ const isLikelyChip = (children: React.ReactNode): boolean => {
 const components: Components = {
   /* ── Headings ─────────────────────────────────────────────────────── */
   h1: ({ children }) => (
-    <h1 className="text-lg font-bold mt-4 mb-2 text-foreground border-b border-border/50 pb-1.5 first:mt-0">
+    <h1 className="text-lg font-bold mt-4 mb-2 text-foreground border-b border-border/50 pb-1.5 first:mt-0 break-words [overflow-wrap:anywhere]">
       {children}
     </h1>
   ),
   h2: ({ children }) => (
-    <h2 className="text-base font-semibold mt-3 mb-1.5 text-foreground/90 first:mt-0">
+    <h2 className="text-base font-semibold mt-3 mb-1.5 text-foreground/90 first:mt-0 break-words [overflow-wrap:anywhere]">
       {children}
     </h2>
   ),
   h3: ({ children }) => (
-    <h3 className="text-sm font-semibold mt-2.5 mb-1 text-foreground/80 first:mt-0">
+    <h3 className="text-sm font-semibold mt-2.5 mb-1 text-foreground/80 first:mt-0 break-words [overflow-wrap:anywhere]">
       {children}
     </h3>
   ),
 
   /* ── Paragraph ────────────────────────────────────────────────────── */
   p: ({ children }) => (
-    <p className="text-[13px] leading-relaxed text-foreground/90 my-1.5 first:mt-0 last:mb-0">
+    <p className="text-[13px] leading-relaxed text-foreground/90 my-1.5 first:mt-0 last:mb-0 break-words [overflow-wrap:anywhere]">
       {children}
     </p>
   ),
@@ -74,13 +74,13 @@ const components: Components = {
     // inline: render as a colour-coded chip
     if (isLikelyChip(children)) {
       return (
-        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[11.5px] font-mono font-medium bg-primary/10 text-primary border border-primary/20 leading-none">
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[11.5px] font-mono font-medium bg-primary/10 text-primary border border-primary/20 leading-normal break-all [overflow-wrap:anywhere]">
           {children}
         </span>
       );
     }
     return (
-      <code className="px-1 py-0.5 rounded text-[11.5px] font-mono bg-muted/60 text-foreground/90 border border-border/40">
+      <code className="px-1 py-0.5 rounded text-[11.5px] font-mono bg-muted/60 text-foreground/90 border border-border/40 break-all [overflow-wrap:anywhere]">
         {children}
       </code>
     );
@@ -88,14 +88,14 @@ const components: Components = {
 
   /* ── Block Code ───────────────────────────────────────────────────── */
   pre: ({ children }) => (
-    <pre className="my-2 rounded-xl overflow-x-auto border border-border/40 bg-[#0d1117] text-[12px] leading-relaxed shadow-inner">
+    <pre className="my-2 rounded-xl overflow-x-auto border border-border/40 bg-[#0d1117] text-[12px] leading-relaxed shadow-inner max-w-full">
       {children}
     </pre>
   ),
 
   /* ── Blockquote ───────────────────────────────────────────────────── */
   blockquote: ({ children }) => (
-    <blockquote className="my-2 pl-3 border-l-2 border-primary/60 bg-primary/5 rounded-r-lg py-1.5 pr-2 text-[12.5px] italic text-foreground/80">
+    <blockquote className="my-2 pl-3 border-l-2 border-primary/60 bg-primary/5 rounded-r-lg py-1.5 pr-2 text-[12.5px] italic text-foreground/80 break-words [overflow-wrap:anywhere] min-w-0">
       {children}
     </blockquote>
   ),
@@ -109,9 +109,9 @@ const components: Components = {
     const isTask = className?.includes("task-list-item");
     return (
       <li
-        className={`text-[13px] text-foreground/90 flex items-start gap-1.5 ${isTask ? "" : "before:content-['•'] before:text-primary/70 before:mt-0.5 before:shrink-0"}`}
+        className={`text-[13px] text-foreground/90 flex items-start gap-1.5 min-w-0 break-words [overflow-wrap:anywhere] ${isTask ? "" : "before:content-['•'] before:text-primary/70 before:mt-0.5 before:shrink-0"}`}
       >
-        <span>{children}</span>
+        <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{children}</span>
       </li>
     );
   },
@@ -123,7 +123,7 @@ const components: Components = {
 
   /* ── Table ────────────────────────────────────────────────────────── */
   table: ({ children }) => (
-    <div className="my-2.5 overflow-x-auto rounded-xl border border-border/50 shadow-sm">
+    <div className="my-2.5 overflow-x-auto rounded-xl border border-border/50 shadow-sm max-w-full">
       <table className="w-full text-[12.5px] border-collapse">{children}</table>
     </div>
   ),
@@ -142,7 +142,7 @@ const components: Components = {
     </th>
   ),
   td: ({ children }) => (
-    <td className="px-3 py-2 text-foreground/80 align-top">{children}</td>
+    <td className="px-3 py-2 text-foreground/80 align-top break-words [overflow-wrap:anywhere]">{children}</td>
   ),
 
   /* ── Links ────────────────────────────────────────────────────────── */
@@ -151,7 +151,7 @@ const components: Components = {
       href={href}
       target="_blank"
       rel="noopener noreferrer"
-      className="text-primary underline underline-offset-2 hover:text-primary/80 transition-colors"
+      className="text-primary underline underline-offset-2 hover:text-primary/80 transition-colors break-all [overflow-wrap:anywhere]"
     >
       {children}
     </a>
@@ -169,7 +169,7 @@ export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) =
   const formattedContent = content.replace(/\[OPTION:\s*([^\]]+)\]/gi, "• **$1**");
 
   return (
-    <div className="markdown-body max-w-none">
+    <div className="markdown-body max-w-none break-words [overflow-wrap:anywhere] min-w-0 w-full">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

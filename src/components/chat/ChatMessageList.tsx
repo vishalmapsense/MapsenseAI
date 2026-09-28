@@ -6,18 +6,24 @@ import { User, Map, Bot, Pencil, X, Check, Loader2, CheckCircle2, Zap, Sparkles 
 import { useChatStore } from "@/stores/useChatStore";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AgentEventInfo } from "@/types/mcp.types";
+import { cleanMessageContent, isInternalOrEmptyMessage } from "@/utils/messageCleaner";
 
 interface ChatMessageListProps {
   messages: ChatMessage[];
   aiName: string;
 }
 
-const extractOptionButtons = (text: string): string[] => {
-  if (!text) return [];
+const extractOptionButtons = (message: ChatMessage): string[] => {
+  const text = message.content || "";
   const options: string[] = [];
 
-  // 1. Explicit [OPTION: label] pattern
-  const optionRegex = /\[OPTION:\s*([^\]]+)\]/gi;
+  // 0. Explicit suggestions from message object (if any)
+  if (Array.isArray(message.suggestions) && message.suggestions.length > 0) {
+    return message.suggestions.slice(0, 6);
+  }
+
+  // 1. Explicit [OPTION: label], [SUGGESTION: label], [CHOICE: label] patterns
+  const optionRegex = /\[(?:OPTION|SUGGESTION|CHOICE):\s*([^\]]+)\]/gi;
   let match;
   while ((match = optionRegex.exec(text)) !== null) {
     const optText = match[1]?.trim();
@@ -26,15 +32,99 @@ const extractOptionButtons = (text: string): string[] => {
     }
   }
 
-  // 2. Fallback: Bulleted options if text asks a clarifying choice/question
-  if (options.length === 0 && /(choose|select|which|confirm|options|did you mean)/i.test(text)) {
+  if (options.length > 0) {
+    return options.slice(0, 6);
+  }
+
+  // 2. Fallback: Bulleted / numbered options if text asks a clarifying choice/question
+  const isClarificationOrChoice =
+    /(choose|select|which|where|confirm|options?|did you mean|clarify|clarification|multiple locations?|suggestions?|chune|chuno|kaunsa|kaunsi|specify|following locations?)/i.test(
+      text,
+    );
+
+  if (isClarificationOrChoice) {
     const lines = text.split("\n");
     for (const line of lines) {
-      const bulletMatch = line.match(/^[\s*-·•\d+.]+\s*(?:\[|\()?([^\]\)\n]{2,60})(?:\]|\))?$/);
+      const trimmed = line.trim();
+      // Match list item: 1. ..., 1) ..., - ..., * ..., • ...
+      const bulletMatch = trimmed.match(/^[\s*-·•\d+.)]+\s*(.+)$/);
       if (bulletMatch && bulletMatch[1]) {
-        const cleaned = bulletMatch[1].replace(/^\*\*|\*\*$/g, "").trim();
-        if (cleaned && !cleaned.toLowerCase().startsWith("http") && !options.includes(cleaned)) {
-          options.push(cleaned);
+        let candidate = bulletMatch[1].trim();
+
+        // Strip markdown bold/italics/quotes
+        candidate = candidate
+          .replace(/^\*\*|\*\*$/g, "")
+          .replace(/^["']|["']$/g, "")
+          .replace(/^\*|\*$/g, "")
+          .trim();
+
+        // If line has explanation separated by " - " or " -- " or " : ", take primary title
+        if (candidate.includes(" - ") || candidate.includes(" – ") || candidate.includes(" — ")) {
+          const parts = candidate.split(/\s+[-–—]\s+/);
+          if (parts[0] && parts[0].trim().length >= 2) {
+            candidate = parts[0].trim();
+          }
+        } else if (candidate.includes(": ") && !candidate.toLowerCase().startsWith("http")) {
+          const parts = candidate.split(/:\s+/);
+          if (parts[0] && parts[0].trim().length >= 2 && parts[0].trim().length <= 60) {
+            candidate = parts[0].trim();
+          }
+        }
+
+        candidate = candidate
+          .replace(/^\*\*|\*\*$/g, "")
+          .replace(/^["']|["']$/g, "")
+          .trim();
+
+        if (
+          candidate.length >= 2 &&
+          candidate.length <= 80 &&
+          !candidate.toLowerCase().startsWith("http") &&
+          !candidate.endsWith("?") &&
+          !options.includes(candidate)
+        ) {
+          options.push(candidate);
+        }
+      }
+    }
+  }
+
+  if (options.length > 0) {
+    return options.slice(0, 6);
+  }
+
+  // 3. Fallback: Extract from toolCalls if geocoding returned multiple candidates
+  if (isClarificationOrChoice && message.toolCalls && message.toolCalls.length > 0) {
+    for (const tool of message.toolCalls) {
+      if (tool.toolName?.includes("geocode") || tool.toolName?.includes("search")) {
+        const res: any = tool.result;
+        const features =
+          res?.features ||
+          res?.structuredContent?.features ||
+          (Array.isArray(res?.content)
+            ? res.content
+                .map((c: any) => {
+                  try {
+                    return JSON.parse(c.text);
+                  } catch {
+                    return null;
+                  }
+                })
+                .filter(Boolean)
+                .flatMap((p: any) => p.features || [])
+            : []);
+
+        if (Array.isArray(features) && features.length > 1) {
+          for (const f of features.slice(0, 5)) {
+            const name =
+              f?.place_name ||
+              f?.properties?.place_name ||
+              f?.properties?.name ||
+              f?.text;
+            if (name && typeof name === "string" && !options.includes(name.trim())) {
+              options.push(name.trim());
+            }
+          }
         }
       }
     }
@@ -43,7 +133,7 @@ const extractOptionButtons = (text: string): string[] => {
   return options.slice(0, 6);
 };
 
-const renderAgentEvents = (events: AgentEventInfo[] | undefined, isLoading: boolean = false) => {
+export const renderAgentEvents = (events: AgentEventInfo[] | undefined, isLoading: boolean = false) => {
   if (!events || events.length === 0) return null;
   
   const timelineEvents: any[] = [];
@@ -123,33 +213,37 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  const displayMessages = messages.filter(
+    (m) => m.isLoading || !isInternalOrEmptyMessage(m.role, m.content)
+  );
+
   // Auto-scroll to bottom when messages change
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [messages]);
+  }, [displayMessages]);
 
-  if (messages.length === 0) {
+  if (displayMessages.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-muted-foreground opacity-70">
         <Map className="w-10 h-10 mb-3" />
-        <p className="text-sm">Start a conversation with {aiName}</p>
+        <p className="text-sm">Start a conversation with MapsenseAI</p>
       </div>
     );
   }
 
   return (
-    <div ref={scrollRef} className="flex flex-col gap-4 p-4 overflow-y-auto h-full scroll-smooth">
-      {messages.map((message) => {
+    <div ref={scrollRef} className="flex flex-col gap-4 p-4 overflow-y-auto overflow-x-hidden h-full scroll-smooth min-w-0">
+      {displayMessages.map((message) => {
         const isUser = message.role === "user";
-        const options = !isUser ? extractOptionButtons(message.content) : [];
+        const options = !isUser ? extractOptionButtons(message) : [];
 
         return (
           <div
             key={message.id}
             className={cn(
-              "group flex flex-col w-full max-w-[85%]",
+              "group flex flex-col w-full max-w-[85%] min-w-0",
               isUser ? "self-end items-end" : "self-start items-start"
             )}
           >
@@ -171,7 +265,7 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
             {/* Message Bubble */}
             <div
               className={cn(
-                "px-3 py-2 rounded-2xl text-[13px] leading-relaxed shadow-sm",
+                "px-3 py-2 rounded-2xl text-[13px] leading-relaxed shadow-sm min-w-0 max-w-full break-words [overflow-wrap:anywhere]",
                 isUser
                   ? "bg-primary text-primary-foreground rounded-br-sm"
                   : "bg-muted/50 dark:bg-muted/30 border border-border/50 text-foreground rounded-bl-sm",
@@ -179,31 +273,31 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
               )}
             >
               {message.isLoading ? (
-                <div className="flex flex-col gap-2 w-full">
+                <div className="flex flex-col gap-2 w-full min-w-0 max-w-full">
                   {renderAgentEvents(message.agentEvents, true)}
                   {message.content && (
-                    <div className="w-full opacity-100">
-                      <MarkdownRenderer content={message.content} />
+                    <div className="w-full opacity-100 min-w-0 max-w-full break-words [overflow-wrap:anywhere]">
+                      <MarkdownRenderer content={cleanMessageContent(message.content)} />
                     </div>
                   )}
                   {message.statusMessage && (
-                    <div className="flex items-center gap-3 min-h-5 mt-1">
-                      <div className="flex items-center gap-1">
+                    <div className="flex items-center gap-3 min-h-5 mt-1 min-w-0">
+                      <div className="flex items-center gap-1 shrink-0">
                         <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "0ms" }} />
                         <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "150ms" }} />
                         <div className="w-1.5 h-1.5 rounded-full bg-current opacity-50 animate-bounce" style={{ animationDelay: "300ms" }} />
                       </div>
-                      <span className="text-[12px] italic opacity-80">{message.statusMessage}</span>
+                      <span className="text-[12px] italic opacity-80 break-words [overflow-wrap:anywhere]">{message.statusMessage}</span>
                     </div>
                   )}
                 </div>
               ) : isUser ? (
                 editingId === message.id ? (
-                  <div className="flex flex-col gap-2 min-w-[200px]">
+                  <div className="flex flex-col gap-2 min-w-[200px] max-w-full">
                     <textarea
                       value={editValue}
                       onChange={(e) => setEditValue(e.target.value)}
-                      className="w-full bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-md p-2 text-[13px] resize-none focus:outline-none border border-primary-foreground/20"
+                      className="w-full bg-primary-foreground/10 text-primary-foreground placeholder:text-primary-foreground/50 rounded-md p-2 text-[13px] resize-none focus:outline-none border border-primary-foreground/20 break-all [overflow-wrap:anywhere]"
                       rows={3}
                       autoFocus
                     />
@@ -226,14 +320,16 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                     </div>
                   </div>
                 ) : (
-                  <div className="relative flex items-start gap-2">
-                    <div className="whitespace-pre-wrap flex-1">{message.content}</div>
+                  <div className="relative flex items-start gap-2 max-w-full min-w-0">
+                    <div className="whitespace-pre-wrap break-all [overflow-wrap:anywhere] flex-1 min-w-0">
+                      {cleanMessageContent(message.content)}
+                    </div>
                     <button
                       onClick={() => {
                         setEditingId(message.id);
-                        setEditValue(message.content);
+                        setEditValue(cleanMessageContent(message.content));
                       }}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-primary-foreground/20 rounded-md -mr-1"
+                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-primary-foreground/20 rounded-md -mr-1 shrink-0"
                       title="Edit and resend"
                     >
                       <Pencil className="w-3.5 h-3.5" />
@@ -243,8 +339,8 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
               ) : (
                 <>
                   {renderAgentEvents(message.agentEvents, false)}
-                  <div className="w-full opacity-100 ">
-                    <MarkdownRenderer content={message.content || "*(No text provided)*"} />
+                  <div className="w-full opacity-100 min-w-0 max-w-full break-words [overflow-wrap:anywhere]">
+                    <MarkdownRenderer content={cleanMessageContent(message.content) || "*(No text provided)*"} />
                   </div>
 
                   {/* Interactive Option / Confirmation Buttons */}
@@ -255,24 +351,25 @@ export const ChatMessageList: React.FC<ChatMessageListProps> = ({ messages, aiNa
                           key={i}
                           disabled={isChatLoading}
                           onClick={() => sendMessage(opt)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-xl bg-primary/10 text-primary border border-primary/30 hover:bg-primary hover:text-primary-foreground transition-all duration-150 shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                          title={`Click to send: "${opt}"`}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-[12px] font-medium rounded-xl bg-primary/10 text-primary border border-primary/30 hover:bg-primary hover:text-primary-foreground transition-all duration-150 shadow-sm active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed break-words cursor-pointer select-none"
                         >
-                          <Sparkles className="w-3.5 h-3.5 opacity-80" />
-                          <span>{opt}</span>
+                          <Sparkles className="w-3.5 h-3.5 opacity-80 shrink-0" />
+                          <span className="break-words [overflow-wrap:anywhere]">{opt}</span>
                         </button>
                       ))}
                     </div>
                   )}
 
                   {message.executionMessages && (
-                    <details className="mt-2 text-[9px] text-muted-foreground opacity-80 border-t border-border/50 pt-2 group">
+                    <details className="mt-2 text-[9px] text-muted-foreground opacity-80 border-t border-border/50 pt-2 group max-w-full">
                       <summary className="font-semibold text-foreground/70 cursor-pointer flex items-center gap-1.5 select-none hover:text-foreground/90 transition-colors list-none [&::-webkit-details-marker]:hidden">
                         <span className="text-[7px] transition-transform group-open:rotate-90">▶</span>
                         Map Actions ({message.executionMessages.length})
                       </summary>
-                      <div className="flex flex-col gap-0.5 mt-1.5 pl-3 border-l-2 border-border/30 ml-1 py-0.5">
+                      <div className="flex flex-col gap-0.5 mt-1.5 pl-3 border-l-2 border-border/30 ml-1 py-0.5 max-w-full min-w-0">
                         {message.executionMessages.map((msg, i) => (
-                          <span key={i}>{msg}</span>
+                          <span key={i} className="break-all [overflow-wrap:anywhere]">{msg}</span>
                         ))}
                       </div>
                     </details>

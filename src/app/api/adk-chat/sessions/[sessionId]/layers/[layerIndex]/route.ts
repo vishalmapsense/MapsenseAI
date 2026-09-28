@@ -27,6 +27,23 @@ export async function DELETE(
 
     const userId = user.email || user.id;
 
+    // Check and clean up storage file if layer was stored in Supabase Storage
+    try {
+      const { data: targetLayer } = await supabase
+        .from("session_layers")
+        .select("geojson")
+        .eq("user_id", userId)
+        .eq("session_id", sessionId)
+        .eq("layer_index", layerIdx)
+        .maybeSingle();
+
+      if (targetLayer?.geojson?._is_storage && targetLayer.geojson?._storage_path) {
+        await supabase.storage.from("session-layers").remove([targetLayer.geojson._storage_path]);
+      }
+    } catch (e) {
+      console.warn("[Layer DELETE] Failed to remove storage file:", e);
+    }
+
     // Delete the specific layer
     const { error: deleteError } = await supabase
       .from("session_layers")

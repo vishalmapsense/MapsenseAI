@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { globalSessionService } from "../../route";
 import { createClient } from "@/utils/supabase/server";
 import { cookies } from "next/headers";
+import { cleanMessageContent, isInternalOrEmptyMessage } from "@/utils/messageCleaner";
 
 export async function GET(
   req: NextRequest,
@@ -39,12 +40,16 @@ export async function GET(
             if (part.text) text += part.text;
           }
           if (text) {
-            messages.push({
-              id: event.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              role: event.author === "user" ? "user" : "assistant",
-              content: text,
-              timestamp: event.timestamp || Date.now(),
-            });
+            const role = event.author === "user" ? "user" : "assistant";
+            const cleaned = cleanMessageContent(text);
+            if (cleaned && !isInternalOrEmptyMessage(role, text)) {
+              messages.push({
+                id: event.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role,
+                content: cleaned,
+                timestamp: event.timestamp || Date.now(),
+              });
+            }
           }
         }
       }
@@ -76,6 +81,25 @@ export async function DELETE(
     }
     
     const userId = user.email || user.id;
+
+    // Clean up any files stored in Supabase Storage
+    try {
+      let query = supabase.from("session_layers").select("geojson").eq("user_id", userId);
+      if (sessionId !== "all") {
+        query = query.eq("session_id", sessionId);
+      }
+      const { data: layers } = await query;
+      const storagePaths = (layers || [])
+        .filter((l: any) => l.geojson?._is_storage && l.geojson?._storage_path)
+        .map((l: any) => l.geojson._storage_path);
+
+      if (storagePaths.length > 0) {
+        console.log(`[Session DELETE] 🗑️ Removing ${storagePaths.length} file(s) from Supabase Storage`);
+        await supabase.storage.from("session-layers").remove(storagePaths);
+      }
+    } catch (cleanErr) {
+      console.warn("[Session DELETE] Storage cleanup error:", cleanErr);
+    }
 
     if (sessionId === "all") {
       // Delete layers for all sessions first

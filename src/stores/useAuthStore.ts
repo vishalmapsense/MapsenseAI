@@ -11,7 +11,7 @@ interface AuthState {
   setAuthModalOpen: (isOpen: boolean) => void;
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
-  initAuth: () => void;
+  initAuth: () => () => void;
 }
 
 export const useAuthStore = create<AuthState>((set, get) => {

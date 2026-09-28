@@ -184,6 +184,7 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
     return {
       type: "FeatureCollection",
       features,
+      properties: data.properties || { title: defaultLabel },
     };
   }
 
@@ -245,6 +246,90 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
     if (result) return result;
   }
 
+  // 7b. Check for nearby_pois (e.g., from ground_location_tool)
+  if (Array.isArray(data.nearby_pois) && data.nearby_pois.length > 0) {
+    console.log(`[SpatialNormalizer] Found 'nearby_pois' array with ${data.nearby_pois.length} items. Converting to FeatureCollection.`);
+    const features: any[] = [];
+
+    // Include anchor / center place if available
+    const centerLng = data.longitude ?? data.lng ?? data.lon;
+    const centerLat = data.latitude ?? data.lat;
+    if (typeof centerLng === "number" && typeof centerLat === "number") {
+      features.push({
+        type: "Feature",
+        geometry: {
+          type: "Point",
+          coordinates: [centerLng, centerLat],
+        },
+        properties: {
+          name: data.place || data.name || data.full_address || "Search Center",
+          address: data.full_address || data.address,
+          type: "center",
+        },
+      });
+    }
+
+    for (const poi of data.nearby_pois) {
+      const pLng = poi.longitude ?? poi.lng ?? poi.lon;
+      const pLat = poi.latitude ?? poi.lat;
+      if (typeof pLng === "number" && typeof pLat === "number") {
+        features.push({
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [pLng, pLat],
+          },
+          properties: {
+            name: poi.name || "POI",
+            category: poi.category || poi.poi_category,
+            address: poi.address || poi.full_address,
+            distance_meters: poi.distance_meters,
+            distance: poi.distance_meters != null ? `${poi.distance_meters}m` : undefined,
+          },
+        });
+      }
+    }
+
+    if (features.length > 0) {
+      return {
+        type: "FeatureCollection",
+        features,
+      };
+    }
+  }
+
+  // 7c. Check for places / results / pois arrays with lat/lon
+  const possibleList = data.places || data.results || data.pois;
+  if (Array.isArray(possibleList) && possibleList.length > 0) {
+    console.log(`[SpatialNormalizer] Found list array with ${possibleList.length} items.`);
+    const features: any[] = [];
+    for (const item of possibleList) {
+      const iLng = item.longitude ?? item.lng ?? item.lon ?? (Array.isArray(item.coordinates) ? item.coordinates[0] : undefined);
+      const iLat = item.latitude ?? item.lat ?? (Array.isArray(item.coordinates) ? item.coordinates[1] : undefined);
+      if (typeof iLng === "number" && typeof iLat === "number") {
+        features.push({
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [iLng, iLat],
+          },
+          properties: {
+            name: item.name || item.title || "Place",
+            category: item.category || item.poi_category,
+            address: item.address || item.full_address,
+            ...item,
+          },
+        });
+      }
+    }
+    if (features.length > 0) {
+      return {
+        type: "FeatureCollection",
+        features,
+      };
+    }
+  }
+
   // 8. Custom raw object with coordinates but no geometry type (e.g. { id, coordinates })
   if (Array.isArray(data.coordinates)) {
     console.log(`[SpatialNormalizer] Found raw 'coordinates' property. Inferring geometry type...`);
@@ -281,6 +366,28 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
     };
   }
 
+  // 9. Single object with latitude and longitude directly
+  const sLng = data.longitude ?? data.lng ?? data.lon;
+  const sLat = data.latitude ?? data.lat;
+  if (typeof sLng === "number" && typeof sLat === "number" && !data.type) {
+    return {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          geometry: {
+            type: "Point",
+            coordinates: [sLng, sLat],
+          },
+          properties: {
+            name: data.name || data.title || data.place || defaultLabel,
+            ...data,
+          },
+        },
+      ],
+    };
+  }
+
   console.warn("[SpatialNormalizer] Could not normalize data. Object keys:", Object.keys(data));
   return null;
 }
@@ -290,6 +397,128 @@ export type McpResourceResolver = (uri: string) => Promise<any>;
 export interface SpatialFetchOptions {
   mapboxToken?: string;
   resolveMcpResource?: McpResourceResolver;
+}
+
+/**
+ * Resolves a mapbox://selffetch/directions URI into a full GeoJSON FeatureCollection
+ * containing the route LineString geometry and waypoints from Mapbox Directions API.
+ */
+export async function resolveDirectionsSelfFetch(
+  targetUrl: string,
+  label: string = "Route",
+  options?: SpatialFetchOptions
+): Promise<any> {
+  const queryIdx = targetUrl.indexOf("?data=");
+  if (queryIdx === -1) return null;
+
+  try {
+    const rawParam = targetUrl.slice(queryIdx + 6).split("&")[0];
+    const decodedStr =
+      Buffer.from(rawParam, "base64url").toString("utf-8") ||
+      Buffer.from(rawParam, "base64").toString("utf-8");
+    const params = JSON.parse(decodedStr);
+
+    if (!params || !Array.isArray(params.coordinates) || params.coordinates.length < 2) {
+      return null;
+    }
+
+    const coordsStr = params.coordinates
+      .map((c: any) => {
+        const lng = c.longitude ?? c.lng ?? (Array.isArray(c) ? c[0] : undefined);
+        const lat = c.latitude ?? c.lat ?? (Array.isArray(c) ? c[1] : undefined);
+        return `${lng},${lat}`;
+      })
+      .join(";");
+
+    let profile = params.routing_profile || "mapbox/driving-traffic";
+    if (!profile.startsWith("mapbox/")) {
+      profile = `mapbox/${profile}`;
+    }
+
+    const token =
+      process.env.MAPBOX_SECRET_TOKEN ||
+      process.env.MAPBOX_ACCESS_TOKEN ||
+      options?.mapboxToken ||
+      process.env.NEXT_PUBLIC_MAPBOX_TOKEN ||
+      "";
+
+    if (!token) {
+      console.warn("[SpatialNormalizer] No Mapbox token available to resolve directions selffetch.");
+      return null;
+    }
+
+    const apiUrl = `https://api.mapbox.com/directions/v5/${profile}/${coordsStr}?geometries=geojson&overview=full&access_token=${token}`;
+    console.log(`🗺️ [SpatialNormalizer] Resolving full route LineString from Mapbox Directions API (${profile})...`);
+
+    const res = await fetch(apiUrl);
+    if (!res.ok) {
+      console.warn(`[SpatialNormalizer] Mapbox Directions API returned HTTP ${res.status}`);
+      return null;
+    }
+
+    const apiData = await res.json();
+    return normalizeToGeoJSON(apiData, label);
+  } catch (err) {
+    console.error("[SpatialNormalizer] Failed to resolve directions selffetch URI:", err);
+    return null;
+  }
+}
+
+/**
+ * Resolves a mapbox://selffetch/isochrone URI into a GeoJSON FeatureCollection
+ * containing polygon contours from Mapbox Isochrone API.
+ */
+export async function resolveIsochroneSelfFetch(
+  targetUrl: string,
+  label: string = "Isochrone",
+  options?: SpatialFetchOptions
+): Promise<any> {
+  const queryIdx = targetUrl.indexOf("?data=");
+  if (queryIdx === -1) return null;
+
+  try {
+    const rawParam = targetUrl.slice(queryIdx + 6).split("&")[0];
+    const decodedStr =
+      Buffer.from(rawParam, "base64url").toString("utf-8") ||
+      Buffer.from(rawParam, "base64").toString("utf-8");
+    const params = JSON.parse(decodedStr);
+
+    if (!params || !params.coordinates) return null;
+
+    const lng = params.coordinates.longitude ?? params.coordinates.lng ?? (Array.isArray(params.coordinates) ? params.coordinates[0] : undefined);
+    const lat = params.coordinates.latitude ?? params.coordinates.lat ?? (Array.isArray(params.coordinates) ? params.coordinates[1] : undefined);
+    if (typeof lng !== "number" || typeof lat !== "number") return null;
+
+    let profile = params.profile || "mapbox/driving";
+    if (!profile.startsWith("mapbox/")) {
+      profile = `mapbox/${profile}`;
+    }
+
+    const minutes = Array.isArray(params.contours_minutes)
+      ? params.contours_minutes.join(",")
+      : "15";
+
+    const token =
+      process.env.MAPBOX_SECRET_TOKEN ||
+      process.env.MAPBOX_ACCESS_TOKEN ||
+      options?.mapboxToken ||
+      process.env.NEXT_PUBLIC_MAPBOX_TOKEN ||
+      "";
+
+    if (!token) return null;
+
+    const apiUrl = `https://api.mapbox.com/isochrone/v1/${profile}/${lng},${lat}?contours_minutes=${minutes}&polygons=true&access_token=${token}`;
+    console.log(`🗺️ [SpatialNormalizer] Resolving isochrone geometry from Mapbox API (${profile})...`);
+
+    const res = await fetch(apiUrl);
+    if (!res.ok) return null;
+
+    const apiData = await res.json();
+    return normalizeToGeoJSON(apiData, label);
+  } catch (err) {
+    console.error("[SpatialNormalizer] Failed to resolve isochrone selffetch URI:", err);
+    return null;
+  }
 }
 
 /**
@@ -308,6 +537,33 @@ export async function fetchAndNormalizeSpatialUrl(
 
   // 1. Handle Mapbox / MCP custom resource URIs (e.g. mapbox://temp/..., geojson://...)
   if (targetUrl.startsWith("mapbox://") || targetUrl.startsWith("geojson://")) {
+    // 1a. Directions self-fetch: fetch real route geometry (LineString) from Mapbox Directions API
+    if (targetUrl.includes("mapbox://selffetch/directions")) {
+      const directionsResult = await resolveDirectionsSelfFetch(targetUrl, label, options);
+      if (directionsResult) return directionsResult;
+    }
+
+    // 1b. Isochrone self-fetch: fetch real contour polygons from Mapbox Isochrone API
+    if (targetUrl.includes("mapbox://selffetch/isochrone")) {
+      const isochroneResult = await resolveIsochroneSelfFetch(targetUrl, label, options);
+      if (isochroneResult) return isochroneResult;
+    }
+
+    // 1c. General inline data (?data=) fallback
+    if (targetUrl.includes("?data=")) {
+      try {
+        const queryIdx = targetUrl.indexOf("?data=");
+        const rawParam = targetUrl.slice(queryIdx + 6).split("&")[0];
+        const decodedStr = Buffer.from(rawParam, "base64url").toString("utf-8") ||
+                           Buffer.from(rawParam, "base64").toString("utf-8");
+        const parsed = JSON.parse(decodedStr);
+        const norm = normalizeToGeoJSON(parsed, label);
+        if (norm?.features?.length > 0) return norm;
+      } catch (e) {
+        console.warn(`[SpatialNormalizer] Could not decode inline data from URI: ${targetUrl}`, e);
+      }
+    }
+
     if (options?.resolveMcpResource) {
       try {
         console.log(`[SpatialNormalizer] Resolving MCP resource URI via resolver: ${targetUrl}`);
@@ -322,6 +578,75 @@ export async function fetchAndNormalizeSpatialUrl(
       console.warn(`[SpatialNormalizer] Custom scheme '${targetUrl}' received without resolveMcpResource handler.`);
     }
     return null;
+  }
+
+  // 1.5 Handle Local File Paths (e.g. /Users/..., file://..., C:\..., relative paths)
+  const isLocalFilePath =
+    targetUrl.startsWith("file://") ||
+    targetUrl.startsWith("/") ||
+    /^[a-zA-Z]:[\\/]/.test(targetUrl) ||
+    targetUrl.startsWith("./") ||
+    targetUrl.startsWith("../");
+
+  if (isLocalFilePath) {
+    try {
+      let filePath = targetUrl;
+      if (filePath.startsWith("file://")) {
+        try {
+          filePath = new URL(filePath).pathname;
+        } catch {
+          filePath = filePath.replace(/^file:\/\//, "");
+        }
+      }
+
+      const fileLabel =
+        label &&
+        label !== "Spatial Layer" &&
+        label !== "Route Layer" &&
+        label !== "External Data"
+          ? label
+          : filePath.split("/").pop()?.replace(/\.[^/.]+$/, "") || "Local Layer";
+
+      if (typeof window === "undefined") {
+        // Server-side: read directly from local filesystem
+        const fs = await import("fs");
+        if (fs.existsSync(filePath)) {
+          console.log(`🗺️ [SpatialNormalizer] Reading local file from disk: ${filePath}`);
+          const fileContent = await fs.promises.readFile(filePath, "utf-8");
+          const rawData = JSON.parse(fileContent);
+          const normalized = normalizeToGeoJSON(rawData, fileLabel);
+          if (normalized) {
+            normalized._sourcePath = filePath;
+          }
+          return normalized;
+        } else {
+          console.error(`[SpatialNormalizer] Local file does not exist: ${filePath}`);
+          return null;
+        }
+      } else {
+        // Client-side (browser): fetch via POST /api/select-file
+        console.log(`🗺️ [SpatialNormalizer] Requesting local file via API: ${filePath}`);
+        const res = await fetch("/api/select-file", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ path: filePath }),
+        });
+        if (res.ok) {
+          const rawData = await res.json();
+          const normalized = normalizeToGeoJSON(rawData, fileLabel);
+          if (normalized) {
+            normalized._sourcePath = filePath;
+          }
+          return normalized;
+        } else {
+          console.error(`[SpatialNormalizer] Failed to fetch local file via API: HTTP ${res.status}`);
+          return null;
+        }
+      }
+    } catch (err: any) {
+      console.error("[SpatialNormalizer] Failed to read or parse local file:", targetUrl, err);
+      return null;
+    }
   }
 
   // 2. Handle HTTP / HTTPS URLs

@@ -50,13 +50,39 @@ export function createLightweightSummary(
   // Directions / route response
   if (rawResponse?.routes && rawResponse.routes.length > 0) {
     const r = rawResponse.routes[0];
-    const dist = metadata.distanceKm || "?";
-    const dur = metadata.durationMin || "?";
-    const via = r.legs?.[0]?.summary || "";
+    const dist = metadata.distanceKm ? `${metadata.distanceKm} km` : (r.distance ? `${(r.distance / 1000).toFixed(1)} km` : "");
+    const dur = metadata.durationMin ? `${metadata.durationMin} min` : (r.duration ? `${Math.round(r.duration / 60)} min` : "");
+    const via = r.legs?.[0]?.summary || r.leg_summaries?.[0] || metadata.summary || "";
     return (
-      `✅ Route found: ${dist} km, ~${dur} min${via ? ` via ${via}` : ""}. ` +
-      `${fc} features extracted and sent directly to the map for rendering. ` +
+      `✅ Route found${dist ? `: ${dist}` : ""}${dur ? `, ~${dur}` : ""}${via ? ` via ${via}` : ""}. ` +
+      `${fc} features (including complete route path) extracted and sent directly to the map for rendering. ` +
       `Do NOT call map_add_geojson — the map already has the data.`
+    );
+  }
+
+  // Geocoding / search places response (CRITICAL for disambiguation & multiple choices)
+  const isGeocodeOrSearch =
+    toolName.includes("geocode") ||
+    toolName.includes("search") ||
+    rawResponse?.type === "geocode" ||
+    (Array.isArray(rawResponse?.features) &&
+      rawResponse.features.some((f: any) => f?.place_name || f?.properties?.place_name));
+
+  if (isGeocodeOrSearch && Array.isArray(rawResponse?.features) && rawResponse.features.length > 0) {
+    const places = rawResponse.features.slice(0, 5).map((f: any, idx: number) => {
+      const name = f.place_name || f.properties?.place_name || f.properties?.name || f.text || `Location ${idx + 1}`;
+      const coords = f.center || f.geometry?.coordinates;
+      const coordsStr = Array.isArray(coords) && coords.length >= 2
+        ? ` [${Number(coords[0]).toFixed(4)}, ${Number(coords[1]).toFixed(4)}]`
+        : "";
+      return `${idx + 1}. ${name}${coordsStr}`;
+    });
+
+    return (
+      `✅ Found ${fc} candidate location(s) from ${toolName}:\n` +
+      places.join("\n") + "\n\n" +
+      `All ${fc} locations have been sent to the map for rendering. ` +
+      `IMPORTANT: If the user request was ambiguous or multiple locations match the name, list these exact candidate places in your response and provide [OPTION: <place_name>] chips for each choice so the user can easily click one.`
     );
   }
 
@@ -65,6 +91,15 @@ export function createLightweightSummary(
     return (
       `✅ ${fc} spatial features returned and sent directly to the map. ` +
       `Do NOT re-render the data — the map already has it.`
+    );
+  }
+
+  // Nearby POIs response (ground_location_tool or POI search)
+  if (Array.isArray(rawResponse?.nearby_pois) && rawResponse.nearby_pois.length > 0) {
+    const place = rawResponse.place || "the specified location";
+    return (
+      `✅ Found ${rawResponse.nearby_pois.length} places near ${place}. All locations have been extracted and sent directly to the map for rendering. ` +
+      `Do NOT call map_add_geojson or render_map_tool — the data is already on the map.`
     );
   }
 
@@ -90,6 +125,29 @@ export function extractSpatialFromResponse(
   // ── Case 0: structuredContent (MCP structured output) ──
   if (rawResponse.structuredContent) {
     const sc = rawResponse.structuredContent;
+
+    // Check if this is a route response that lacks geometry but has a mapboxRender ref
+    const isRouteWithoutGeom =
+      Array.isArray(sc.routes) &&
+      sc.routes.length > 0 &&
+      !sc.routes.some((r: any) => r.geometry) &&
+      sc.mapboxRender?.ref;
+
+    if (isRouteWithoutGeom) {
+      console.log(
+        `🗺️ [extractSpatialFromResponse] Route response without geometry detected, delegating to mapboxRender ref: ${sc.mapboxRender.ref}`,
+      );
+      return {
+        normalized: null,
+        rawParsed: {
+          _mapboxUri: sc.mapboxRender.ref,
+          _needsMcpResolve: true,
+          routes: sc.routes,
+          waypoints: sc.waypoints,
+        },
+      };
+    }
+
     const norm = normalizeToGeoJSON(sc, toolName || "Spatial Data");
     if (norm?.features?.length > 0) {
       return { normalized: norm, rawParsed: sc };
@@ -123,8 +181,8 @@ export function extractSpatialFromResponse(
           }
         }
 
-        // Check for mapbox:// URI
-        const mapboxUriMatch = trimmed.match(/mapbox:\/\/temp\/[^\s"']+/);
+        // Check for mapbox:// URI (temp, selffetch, or inline)
+        const mapboxUriMatch = trimmed.match(/mapbox:\/\/(?:temp|selffetch|inline)\/[^\s"']+/);
         if (mapboxUriMatch) {
           return {
             normalized: null,
@@ -219,6 +277,7 @@ export function extractMetadata(
     if (r.duration)
       meta.durationMin = String(Math.round(r.duration / 60));
     if (r.legs?.[0]?.summary) meta.summary = r.legs[0].summary;
+    else if (Array.isArray(r.leg_summaries) && r.leg_summaries[0]) meta.summary = r.leg_summaries[0];
   }
 
   return meta;

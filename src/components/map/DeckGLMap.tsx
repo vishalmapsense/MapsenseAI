@@ -16,8 +16,56 @@ import {
   DrawRectangleMode,
   ModifyMode,
 } from "@deck.gl-community/editable-layers";
+
+class SafeDrawPolygonMode extends DrawPolygonMode {
+  handleDoubleClick(event: any, props: any) {
+    const clickSequence = this.getClickSequence();
+    if (clickSequence.length < 3) {
+      props.onEdit({
+        updatedData: props.data,
+        editType: 'cancelFeature',
+        editContext: {}
+      });
+      this.resetClickSequence();
+      return;
+    }
+    super.handleDoubleClick(event, props);
+  }
+
+  handleKeyUp(event: any, props: any) {
+    if (event.key === 'Enter') {
+      const clickSequence = this.getClickSequence();
+      if (clickSequence.length < 3) {
+        props.onEdit({
+          updatedData: props.data,
+          editType: 'cancelFeature',
+          editContext: {}
+        });
+        this.resetClickSequence();
+        return;
+      }
+    }
+    super.handleKeyUp(event, props);
+  }
+}
 import { useMapStore } from "@/stores/useMapStore";
 import { useChatStore } from "@/stores/useChatStore";
+import { createVisualizationLayer } from "@/utils/layerFactory";
+import { MapContextMenu } from "./MapContextMenu";
+import { MapSQLChat } from "./MapSQLChat";
+import type { LayerStyle, RGBAColor } from "@/types/layerStyle.types";
+import {
+  resolveFeatureProperty,
+  resolveFeaturePropertyValue,
+  parseNumericValue,
+  hashStringToColor,
+  interpolateGradient,
+} from "@/utils/propertyResolver";
+import {
+  evaluateStyleRule,
+  matchValueGroup,
+  autoClassifyIndiaRegion,
+} from "@/utils/styleRuleEvaluator";
 import * as turf from "@turf/turf";
 
 const createRasterStyle = (
@@ -48,15 +96,18 @@ const createRasterStyle = (
 });
 
 const getBaseMapStyle = (baseMap: string): string | StyleSpecification => {
+  const cartoApiKey = process.env.NEXT_PUBLIC_CARTO_API_KEY || "";
+  const cartoQuery = cartoApiKey ? `?key=${cartoApiKey}` : "";
+
   switch (baseMap) {
     case "carto-light":
       return createRasterStyle(
         "carto-light",
         [
-          "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-          "https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-          "https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
-          "https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+          `https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://b.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://c.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://d.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png${cartoQuery}`,
         ],
         "© OpenStreetMap contributors © CARTO",
         20,
@@ -65,10 +116,10 @@ const getBaseMapStyle = (baseMap: string): string | StyleSpecification => {
       return createRasterStyle(
         "carto-dark",
         [
-          "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-          "https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-          "https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-          "https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
+          `https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://b.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://c.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png${cartoQuery}`,
+          `https://d.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png${cartoQuery}`,
         ],
         "© OpenStreetMap contributors © CARTO",
         20,
@@ -124,6 +175,246 @@ const getFeatureProperties = (feature: any, layerIndex: number, featureIndex: nu
   _layerIndex: layerIndex,
   _featureIndex: featureIndex,
 });
+
+/**
+ * Resolve fill color for a feature based on a LayerStyle.
+ * Returns null if no style applies (caller uses default).
+ */
+const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): RGBAColor | null => {
+  switch (style.type) {
+    case "category": {
+      // 1. Rules evaluation if explicit rules provided
+      if (style.rules && Array.isArray(style.rules)) {
+        for (const r of style.rules) {
+          if (evaluateStyleRule(props, r)) {
+            if (r.fillColor) return r.fillColor;
+            const entry = style.mapping?.[r.category];
+            if (entry?.fillColor) return entry.fillColor;
+            return hashStringToColor(r.category, style.palette);
+          }
+        }
+      }
+
+      // 2. Value groups evaluation if valueGroups provided
+      if (style.valueGroups && typeof style.valueGroups === "object") {
+        const matched = matchValueGroup(props, style.valueGroups, style.sourceField || style.field);
+        if (matched) {
+          const entry = style.mapping?.[matched];
+          if (entry?.fillColor) return entry.fillColor;
+          return hashStringToColor(matched, style.palette);
+        }
+      }
+
+      // 3. Numeric range evaluation if ranges are specified (e.g. speed thresholds)
+      if (style.ranges && Array.isArray(style.ranges)) {
+        const sourceProp = style.sourceField || style.field;
+        const rawRangeVal = resolveFeaturePropertyValue(props, sourceProp);
+        const numVal = parseNumericValue(rawRangeVal);
+        if (numVal !== null && !isNaN(numVal)) {
+          const ranges = style.ranges;
+          const rLen = ranges.length;
+          for (let i = 0; i < rLen; i++) {
+            const r = ranges[i];
+            const minOk = r.min === undefined || numVal >= r.min;
+            const maxOk = r.max === undefined || numVal < r.max;
+            if (minOk && maxOk) {
+              const exact = style.mapping?.[r.category];
+              if (exact?.fillColor) return exact.fillColor;
+              const lowerCat = r.category.toLowerCase();
+              const lowerEntry = style.mapping?.[lowerCat];
+              if (lowerEntry?.fillColor) return lowerEntry.fillColor;
+              if (style.mapping) {
+                for (const k in style.mapping) {
+                  if (k.toLowerCase() === lowerCat && style.mapping[k]?.fillColor) {
+                    return style.mapping[k].fillColor;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // 4. Direct or fuzzy category value lookup
+      let val = resolveFeaturePropertyValue(props, style.field);
+      if ((val === undefined || val === null) && style.sourceField) {
+        val = resolveFeaturePropertyValue(props, style.sourceField);
+      }
+
+      if (val !== undefined && val !== null) {
+        const key = String(val).trim();
+        // Fast exact match
+        const exact = style.mapping?.[key];
+        if (exact?.fillColor) return exact.fillColor;
+
+        // Case-insensitive match
+        const lowerKey = key.toLowerCase();
+        if (style.mapping) {
+          for (const k in style.mapping) {
+            if (k.toLowerCase() === lowerKey) {
+              const entry = style.mapping[k];
+              if (entry?.fillColor) return entry.fillColor;
+            }
+          }
+        }
+
+        // Resilient fallback: auto-assign deterministic distinct color from palette!
+        return hashStringToColor(key, style.palette);
+      }
+
+      // 5. Semantic India region fallback (South, North, etc.)
+      if (style.mapping && Object.keys(style.mapping).some(k => /^(south|north|east|west|central)/i.test(k.trim()))) {
+        const targetCats = Object.keys(style.mapping);
+        const matchedRegion = autoClassifyIndiaRegion(props, targetCats);
+        if (matchedRegion) {
+          const entry = style.mapping[matchedRegion];
+          if (entry?.fillColor) return entry.fillColor;
+          return hashStringToColor(matchedRegion, style.palette);
+        }
+      }
+
+      // 6. Check if ANY property matches a key in mapping
+      if (style.mapping) {
+        for (const [pk, pv] of Object.entries(props)) {
+          if (pk.startsWith("_") || pv === null || pv === undefined) continue;
+          const sVal = String(pv).trim().toLowerCase();
+          for (const [mk, me] of Object.entries(style.mapping)) {
+            if (mk.toLowerCase() === sVal && me?.fillColor) {
+              return me.fillColor;
+            }
+          }
+        }
+      }
+
+      // 7. Filtering / unmatched fallbacks
+      if (style.hideUnmatched) return [0, 0, 0, 0];
+      if (style.dimUnmatched) return [160, 160, 160, 30];
+      return style.defaultColor || [148, 163, 184, 100];
+    }
+    case "gradient": {
+      const rawVal = resolveFeaturePropertyValue(props, style.field);
+      const val = parseNumericValue(rawVal);
+      if (val === null || isNaN(val)) return style.minColor;
+      return interpolateGradient(val, style.min, style.max, style.minColor, style.maxColor);
+    }
+    case "solid":
+      return style.fillColor;
+    default:
+      return null;
+  }
+};
+
+/**
+ * Resolve line color for a feature based on a LayerStyle.
+ * Returns null if no style applies.
+ */
+const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): RGBAColor | null => {
+  switch (style.type) {
+    case "category": {
+      // 1. Rules evaluation
+      if (style.rules && Array.isArray(style.rules)) {
+        for (const r of style.rules) {
+          if (evaluateStyleRule(props, r)) {
+            if (r.lineColor) return r.lineColor;
+            if (r.fillColor) return [r.fillColor[0], r.fillColor[1], r.fillColor[2], 255];
+            const entry = style.mapping?.[r.category];
+            if (entry?.lineColor) return entry.lineColor;
+            if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+            const h = hashStringToColor(r.category, style.palette);
+            return [h[0], h[1], h[2], 255];
+          }
+        }
+      }
+
+      // 2. Value groups evaluation
+      if (style.valueGroups && typeof style.valueGroups === "object") {
+        const matched = matchValueGroup(props, style.valueGroups, style.sourceField || style.field);
+        if (matched) {
+          const entry = style.mapping?.[matched];
+          if (entry?.lineColor) return entry.lineColor;
+          if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+          const h = hashStringToColor(matched, style.palette);
+          return [h[0], h[1], h[2], 255];
+        }
+      }
+
+      // 3. Numeric range evaluation if ranges are specified
+      if (style.ranges && Array.isArray(style.ranges)) {
+        const sourceProp = style.sourceField || style.field;
+        const rawRangeVal = resolveFeaturePropertyValue(props, sourceProp);
+        const numVal = parseNumericValue(rawRangeVal);
+        if (numVal !== null && !isNaN(numVal)) {
+          const ranges = style.ranges;
+          const rLen = ranges.length;
+          for (let i = 0; i < rLen; i++) {
+            const r = ranges[i];
+            const minOk = r.min === undefined || numVal >= r.min;
+            const maxOk = r.max === undefined || numVal < r.max;
+            if (minOk && maxOk) {
+              const exact = style.mapping?.[r.category];
+              if (exact?.lineColor) return exact.lineColor;
+              if (exact?.fillColor) return [exact.fillColor[0], exact.fillColor[1], exact.fillColor[2], 255];
+              const lowerCat = r.category.toLowerCase();
+              const lowerEntry = style.mapping?.[lowerCat];
+              if (lowerEntry?.lineColor) return lowerEntry.lineColor;
+              if (lowerEntry?.fillColor) return [lowerEntry.fillColor[0], lowerEntry.fillColor[1], lowerEntry.fillColor[2], 255];
+            }
+          }
+        }
+      }
+
+      let val = resolveFeaturePropertyValue(props, style.field);
+      if ((val === undefined || val === null) && style.sourceField) {
+        val = resolveFeaturePropertyValue(props, style.sourceField);
+      }
+
+      if (val !== undefined && val !== null) {
+        const key = String(val).trim();
+        const exactEntry = style.mapping?.[key];
+        if (exactEntry?.lineColor) return exactEntry.lineColor;
+        if (exactEntry?.fillColor) {
+          return [exactEntry.fillColor[0], exactEntry.fillColor[1], exactEntry.fillColor[2], 255];
+        }
+        const lowerKey = key.toLowerCase();
+        if (style.mapping) {
+          for (const k in style.mapping) {
+            if (k.toLowerCase() === lowerKey) {
+              const entry = style.mapping[k];
+              if (entry?.lineColor) return entry.lineColor;
+              if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+            }
+          }
+        }
+        const hashed = hashStringToColor(key, style.palette);
+        return [hashed[0], hashed[1], hashed[2], 255];
+      }
+
+      // Semantic India region fallback
+      if (style.mapping && Object.keys(style.mapping).some(k => /^(south|north|east|west|central)/i.test(k.trim()))) {
+        const matchedRegion = autoClassifyIndiaRegion(props, Object.keys(style.mapping));
+        if (matchedRegion) {
+          const entry = style.mapping[matchedRegion];
+          if (entry?.lineColor) return entry.lineColor;
+          if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+        }
+      }
+
+      if (style.hideUnmatched) return [0, 0, 0, 0];
+      if (style.dimUnmatched) return [160, 160, 160, 50];
+      const dc = style.defaultColor || [148, 163, 184, 100];
+      return [dc[0], dc[1], dc[2], 255];
+    }
+    case "gradient": {
+      const fill = resolveStyleFillColor(props, style);
+      if (fill) return [fill[0], fill[1], fill[2], 255];
+      return null;
+    }
+    case "solid":
+      return style.lineColor || (style.fillColor ? [style.fillColor[0], style.fillColor[1], style.fillColor[2], 255] : null);
+    default:
+      return null;
+  }
+};
 
 const markerIconSvg = encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="96" height="128" viewBox="0 0 96 128">
@@ -204,7 +495,15 @@ export const DeckGLMap = () => {
     setMapFeatures,
     hoverInfo,
     setHoverInfo,
-    zoomTrigger
+    zoomTrigger,
+    highlightedFeatureId,
+    lockedHoverInfo,
+    setLockedHoverInfo,
+    visualizationLayers,
+    mapFeatureLayerTypes,
+    mapFeatureLayerConfigs,
+    hiddenLayerIndexes,
+    mapFeatureLayerStyles,
   } = useMapStore();
 
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -214,7 +513,86 @@ export const DeckGLMap = () => {
     features: []
   });
 
+  const openMapSqlChat = useChatStore((state) => state.openMapSqlChat);
+  const [contextMenu, setContextMenu] = useState<{
+    isOpen: boolean;
+    x: number;
+    y: number;
+    lng: number;
+    lat: number;
+  } | null>(null);
+
   const handledZoomTriggerRef = useRef(zoomTrigger);
+
+  // Right-click context menu handler
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const onNativeContextMenu = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.closest("[data-no-context]") ||
+        target.closest(".fixed") ||
+        target.closest("button") ||
+        target.closest("input") ||
+        target.closest("textarea")
+      ) {
+        return;
+      }
+
+      e.preventDefault();
+      const rect = container.getBoundingClientRect();
+      const screenX = e.clientX - rect.left;
+      const screenY = e.clientY - rect.top;
+
+      try {
+        const viewport = new WebMercatorViewport({
+          width: rect.width || (typeof window !== "undefined" ? window.innerWidth : 800),
+          height: rect.height || (typeof window !== "undefined" ? window.innerHeight : 600),
+          longitude: viewState.longitude,
+          latitude: viewState.latitude,
+          zoom: viewState.zoom,
+          pitch: viewState.pitch,
+          bearing: viewState.bearing,
+        });
+
+        const [lng, lat] = viewport.unproject([screenX, screenY]);
+        if (Number.isFinite(lng) && Number.isFinite(lat)) {
+          setContextMenu({
+            isOpen: true,
+            x: e.clientX,
+            y: e.clientY,
+            lng,
+            lat,
+          });
+        }
+      } catch (err) {
+        console.warn("Failed to unproject coordinates on right click", err);
+      }
+    };
+
+    container.addEventListener("contextmenu", onNativeContextMenu, true);
+    return () => {
+      container.removeEventListener("contextmenu", onNativeContextMenu, true);
+    };
+  }, [viewState]);
+
+  const handleSqlQueryFromContextMenu = () => {
+    if (contextMenu) {
+      const container = containerRef.current;
+      const rect = container?.getBoundingClientRect();
+      const relX = rect ? contextMenu.x - rect.left : contextMenu.x;
+      const relY = rect ? contextMenu.y - rect.top : contextMenu.y;
+      openMapSqlChat({
+        x: relX,
+        y: relY,
+        lng: contextMenu.lng,
+        lat: contextMenu.lat,
+      });
+      setContextMenu(null);
+    }
+  };
 
   useEffect(() => {
     const node = containerRef.current;
@@ -234,15 +612,11 @@ export const DeckGLMap = () => {
     return () => observer.disconnect();
   }, []);
 
-  const fitToGeoJson = (geojson: any, transitionDuration = 1000) => {
-    const normalized = normalizeGeoJson(geojson);
-    if (!normalized?.features?.length) return;
-
-    const bbox = turf.bbox(normalized);
-    if (bbox.some((value) => !Number.isFinite(value))) return;
+  const fitToBbox = (bbox: [number, number, number, number], transitionDuration = 1000) => {
+    if (!bbox || bbox.some((value) => !Number.isFinite(value))) return;
 
     const [minLng, minLat, maxLng, maxLat] = bbox;
-    const center = turf.center(normalized).geometry.coordinates;
+    const center = [(minLng + maxLng) / 2, (minLat + maxLat) / 2];
     const width = viewportSize.width || (typeof window !== "undefined" ? window.innerWidth : 1024);
     const height = viewportSize.height || (typeof window !== "undefined" ? window.innerHeight : 768);
 
@@ -282,10 +656,19 @@ export const DeckGLMap = () => {
     });
   };
 
+  const fitToGeoJson = (geojson: any, transitionDuration = 1000) => {
+    const normalized = normalizeGeoJson(geojson);
+    if (!normalized?.features?.length) return;
+
+    const bbox = turf.bbox(normalized) as [number, number, number, number];
+    fitToBbox(bbox, transitionDuration);
+  };
+
   const editableData = useMemo(() => {
     if (interactionMode !== "EDIT_GEOMETRY") return drawFeatures;
 
     const features = mapFeatures.flatMap((featureObj, layerIndex) => {
+      if (hiddenLayerIndexes.includes(layerIndex)) return [];
       const normalized = normalizeGeoJson(featureObj);
       return (normalized?.features || []).map((feature: any, featureIndex: number) => ({
         ...feature,
@@ -294,7 +677,7 @@ export const DeckGLMap = () => {
     });
 
     return { type: "FeatureCollection", features };
-  }, [drawFeatures, interactionMode, mapFeatures]);
+  }, [drawFeatures, interactionMode, mapFeatures, hiddenLayerIndexes]);
 
   // Handle explicit zoom trigger
   useEffect(() => {
@@ -305,21 +688,36 @@ export const DeckGLMap = () => {
     handledZoomTriggerRef.current = zoomTrigger;
 
     try {
-      const allFeatures = mapFeatures.reduce((acc, f) => {
-        let nf = f;
-        if (nf?.type === "Feature") nf = { type: "FeatureCollection", features: [nf] };
-        if (nf?.features) acc.push(...nf.features);
-        return acc;
-      }, []);
+      let minLng = Infinity;
+      let minLat = Infinity;
+      let maxLng = -Infinity;
+      let maxLat = -Infinity;
+      let hasValidBounds = false;
 
-      if (allFeatures.length > 0) {
-        const fc = turf.featureCollection(allFeatures);
-        fitToGeoJson(fc);
+      // Filter to visible features first; fall back to all if all are hidden
+      const visibleFeatures = mapFeatures.filter((_, idx) => !hiddenLayerIndexes.includes(idx));
+      const targetFeatures = visibleFeatures.length > 0 ? visibleFeatures : mapFeatures;
+
+      for (const f of targetFeatures) {
+        const normalized = normalizeGeoJson(f);
+        if (!normalized?.features?.length) continue;
+        const bbox = turf.bbox(normalized);
+        if (bbox && bbox.every(Number.isFinite)) {
+          minLng = Math.min(minLng, bbox[0]);
+          minLat = Math.min(minLat, bbox[1]);
+          maxLng = Math.max(maxLng, bbox[2]);
+          maxLat = Math.max(maxLat, bbox[3]);
+          hasValidBounds = true;
+        }
+      }
+
+      if (hasValidBounds) {
+        fitToBbox([minLng, minLat, maxLng, maxLat]);
       }
     } catch (e) {
       console.error("Failed to zoom to all features", e);
     }
-  }, [zoomTrigger, mapFeatures]);
+  }, [zoomTrigger, mapFeatures, hiddenLayerIndexes]);
 
   // Listen for Enter/Escape
   useEffect(() => {
@@ -339,7 +737,7 @@ export const DeckGLMap = () => {
     switch (interactionMode) {
       case "DRAW_POINT": return DrawPointMode;
       case "DRAW_LINE": return DrawLineStringMode;
-      case "DRAW_POLYGON": return DrawPolygonMode;
+      case "DRAW_POLYGON": return SafeDrawPolygonMode;
       case "DRAW_RECTANGLE": return DrawRectangleMode;
       case "DRAW_CIRCLE": return DrawCircleFromCenterMode;
       case "EDIT_GEOMETRY": return ModifyMode;
@@ -360,6 +758,38 @@ export const DeckGLMap = () => {
       const normalized: any = normalizeGeoJson(featureObj);
       if (!normalized) return;
 
+      const isVisible = !hiddenLayerIndexes.includes(layerIndex);
+
+      // Check if this layer has a non-GeoJson type override
+      const layerType = mapFeatureLayerTypes[layerIndex];
+      if (layerType && layerType !== "GeoJsonLayer") {
+        if (!isVisible) return;
+        // Extract features as flat data for the visualization layer factory
+        const features = normalized.features || [];
+        const flatData: any[] = [];
+        features.forEach((f: any) => {
+          const props = f.properties || {};
+          if (f.geometry?.type === "MultiPolygon" && Array.isArray(f.geometry.coordinates)) {
+            f.geometry.coordinates.forEach((polyCoords: any) => {
+              flatData.push({ ...props, polygon: polyCoords, geometry: { type: "Polygon", coordinates: polyCoords } });
+            });
+          } else if (f.geometry?.type === "Point") {
+            flatData.push({ ...props, position: f.geometry.coordinates, geometry: f.geometry });
+          } else if (f.geometry?.type === "Polygon") {
+            flatData.push({ ...props, polygon: f.geometry.coordinates, geometry: f.geometry });
+          } else {
+            flatData.push({ ...props, geometry: f.geometry });
+          }
+        });
+        const config = mapFeatureLayerConfigs[layerIndex] || {};
+        const vizLayer = createVisualizationLayer(layerType, flatData, `mapfeat-${layerIndex}`, config);
+        if (vizLayer) {
+          renderLayers.push(vizLayer);
+          return;
+        }
+        // If factory returned null, fall through to GeoJsonLayer
+      }
+
       // Add indices for hover/click
       if (normalized.features) {
         normalized.features = normalized.features.map((f: any, i: number) => ({
@@ -373,7 +803,8 @@ export const DeckGLMap = () => {
       const layer = new GeoJsonLayer({
         id: `geojson-layer-${layerIndex}`,
         data: normalized,
-        pickable: true,
+        visible: isVisible,
+        pickable: isVisible,
         stroked: true,
         filled: true,
         extruded: false,
@@ -381,31 +812,72 @@ export const DeckGLMap = () => {
         lineWidthScale: 1,
         lineWidthMinPixels: 2,
         getFillColor: (d: any) => {
-          const isHighlighted = hoverInfo?.props?._layerIndex === layerIndex && 
-                               (hoverInfo.props._featureIndex === undefined || hoverInfo.props._featureIndex === d.properties._featureIndex);
+          const activeInfo = hoverInfo || lockedHoverInfo;
+          const isHovered = activeInfo?.props?._layerIndex === layerIndex &&
+            (activeInfo.props._featureIndex === undefined || activeInfo.props._featureIndex === d.properties._featureIndex);
+          const isTableHighlighted = d.properties?.featureId && d.properties.featureId === highlightedFeatureId;
+          const isHighlighted = isHovered || isTableHighlighted;
+
           if (isHighlighted) return [234, 179, 8, 100]; // eab308 40%
-          if (selectedLayerIndex === layerIndex) return [14, 165, 233, 90]; // sky
-          
+
           if (interactionMode === "DELETE_GEOMETRY") return [239, 68, 68, 70]; // red
           if (interactionMode === "EDIT_GEOMETRY") return [245, 158, 11, 70]; // amber
           if (interactionMode === "SELECT_LAYER") return [34, 197, 94, 70]; // green
-          
+
+          // Data-driven style takes precedence for layer fill color
+          const layerStyle = mapFeatureLayerStyles[layerIndex];
+          if (layerStyle) {
+            const styledColor = resolveStyleFillColor(d.properties, layerStyle);
+            if (styledColor) return styledColor;
+          }
+
+          if (selectedLayerIndex === layerIndex) return [14, 165, 233, 90]; // sky
+
           return [59, 130, 246, 50]; // default blue
         },
         getLineColor: (d: any) => {
-          const isHighlighted = hoverInfo?.props?._layerIndex === layerIndex && 
-                               (hoverInfo.props._featureIndex === undefined || hoverInfo.props._featureIndex === d.properties._featureIndex);
+          const activeInfo = hoverInfo || lockedHoverInfo;
+          const isHovered = activeInfo?.props?._layerIndex === layerIndex &&
+            (activeInfo.props._featureIndex === undefined || activeInfo.props._featureIndex === d.properties._featureIndex);
+          const isTableHighlighted = d.properties?.featureId && d.properties.featureId === highlightedFeatureId;
+          const isHighlighted = isHovered || isTableHighlighted;
+
           if (isHighlighted) return [234, 179, 8, 255]; // eab308
           if (selectedLayerIndex === layerIndex) return [14, 165, 233, 255]; // sky
-          
+
           if (interactionMode === "DELETE_GEOMETRY") return [239, 68, 68, 255];
           if (interactionMode === "EDIT_GEOMETRY") return [245, 158, 11, 255];
           if (interactionMode === "SELECT_LAYER") return [34, 197, 94, 255];
-          
+
+          // Data-driven style
+          const layerStyle = mapFeatureLayerStyles[layerIndex];
+          if (layerStyle) {
+            const styledColor = resolveStyleLineColor(d.properties, layerStyle);
+            if (styledColor) return styledColor;
+          }
+
           return [59, 130, 246, 255]; // default blue
         },
-        getPointRadius: 6,
-        getLineWidth: selectedLayerIndex === layerIndex ? 5 : 3,
+        getPointRadius: (d: any) => {
+          const layerStyle = mapFeatureLayerStyles[layerIndex];
+          if (layerStyle?.sizeField) {
+            const rawVal = resolveFeaturePropertyValue(d.properties, layerStyle.sizeField);
+            const val = parseNumericValue(rawVal);
+            if (val !== null && !isNaN(val)) {
+              const minR = layerStyle.minRadius ?? 4;
+              const maxR = layerStyle.maxRadius ?? 24;
+              return Math.min(maxR, Math.max(minR, minR + (val / 100) * (maxR - minR)));
+            }
+          }
+          return layerStyle?.pointRadius ?? (layerStyle ? 8 : 6);
+        },
+        pointRadiusMinPixels: 3,
+        pointRadiusMaxPixels: 60,
+        getLineWidth: () => {
+          if (selectedLayerIndex === layerIndex) return 5;
+          const layerStyle = mapFeatureLayerStyles[layerIndex];
+          return layerStyle?.lineWidth ?? 3;
+        },
         onHover: (info: any) => {
           if (info.object) {
             setHoverInfo({
@@ -418,13 +890,17 @@ export const DeckGLMap = () => {
           }
         },
         updateTriggers: {
-          getFillColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex],
-          getLineColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex],
-          getLineWidth: [selectedLayerIndex],
+          getFillColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, lockedHoverInfo?.props?._layerIndex, lockedHoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex, highlightedFeatureId, mapFeatureLayerStyles[layerIndex]],
+          getLineColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, lockedHoverInfo?.props?._layerIndex, lockedHoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex, highlightedFeatureId, mapFeatureLayerStyles[layerIndex]],
+          getPointRadius: [mapFeatureLayerStyles[layerIndex]],
+          getLineWidth: [selectedLayerIndex, mapFeatureLayerStyles[layerIndex]],
         },
         onClick: (info: any) => {
-          if (!info.object) return;
-          
+          if (!info.object) {
+            setLockedHoverInfo(null);
+            return;
+          }
+
           if (interactionMode === "DELETE_GEOMETRY") {
             const lIdx = info.object.properties._layerIndex;
             const fIdx = info.object.properties._featureIndex;
@@ -450,62 +926,64 @@ export const DeckGLMap = () => {
         }
       });
 
-      const markerLayer = pointMarkers.length > 0
+      const hasActiveStyle = !!mapFeatureLayerStyles[layerIndex];
+      const markerLayer = (pointMarkers.length > 0 && isVisible && !hasActiveStyle)
         ? new IconLayer({
-            id: `point-marker-layer-${layerIndex}`,
-            data: pointMarkers,
-            pickable: true,
-            billboard: true,
-            iconAtlas: MARKER_ICON_ATLAS,
-            iconMapping: MARKER_ICON_MAPPING,
-            getIcon: () => "marker",
-            getPosition: (d: any) => d.position,
-            getSize: () => selectedLayerIndex === layerIndex ? 46 : 38,
-            sizeUnits: "pixels",
-            sizeMinPixels: selectedLayerIndex === layerIndex ? 42 : 34,
-            sizeMaxPixels: selectedLayerIndex === layerIndex ? 58 : 48,
-            getPixelOffset: [0, -8],
-            onHover: (info: any) => {
-              if (info.object) {
-                setHoverInfo({
-                  props: info.object.properties,
-                  x: info.x,
-                  y: info.y
-                });
-              } else {
-                setHoverInfo(null);
-              }
-            },
-            onClick: (info: any) => {
-              if (!info.object) return;
+          id: `point-marker-layer-${layerIndex}`,
+          data: pointMarkers,
+          visible: isVisible,
+          pickable: isVisible,
+          billboard: true,
+          iconAtlas: MARKER_ICON_ATLAS,
+          iconMapping: MARKER_ICON_MAPPING,
+          getIcon: () => "marker",
+          getPosition: (d: any) => d.position,
+          getSize: () => selectedLayerIndex === layerIndex ? 46 : 38,
+          sizeUnits: "pixels",
+          sizeMinPixels: selectedLayerIndex === layerIndex ? 42 : 34,
+          sizeMaxPixels: selectedLayerIndex === layerIndex ? 58 : 48,
+          getPixelOffset: [0, -8],
+          onHover: (info: any) => {
+            if (info.object) {
+              setHoverInfo({
+                props: info.object.properties,
+                x: info.x,
+                y: info.y
+              });
+            } else {
+              setHoverInfo(null);
+            }
+          },
+          onClick: (info: any) => {
+            if (!info.object) return;
 
-              if (interactionMode === "DELETE_GEOMETRY") {
-                const lIdx = info.object.properties._layerIndex;
-                const fIdx = info.object.properties._featureIndex;
-                const updated = [...mapFeatures];
-                const targetLayer = normalizeGeoJson(updated[lIdx]);
-                if (targetLayer?.features && targetLayer.features.length > 1 && typeof fIdx === "number") {
-                  const nextFeatures = targetLayer.features.filter((_: any, index: number) => index !== fIdx);
-                  updated[lIdx] = { ...targetLayer, features: nextFeatures };
-                } else {
-                  updated.splice(lIdx, 1);
-                }
-                setMapFeatures(updated);
-                setSelectedLayerIndex(null);
-                setHoverInfo(null);
-              } else if (interactionMode === "SELECT_LAYER") {
-                const lIdx = info.object.properties._layerIndex;
-                const featureCollection = mapFeatures[lIdx];
-                if (featureCollection) {
-                  setSelectedLayerIndex(lIdx);
-                  useChatStore.getState().addSelectedLayer(featureCollection);
-                }
+            if (interactionMode === "DELETE_GEOMETRY") {
+              const lIdx = info.object.properties._layerIndex;
+              const fIdx = info.object.properties._featureIndex;
+              const updated = [...mapFeatures];
+              const targetLayer = normalizeGeoJson(updated[lIdx]);
+              if (targetLayer?.features && targetLayer.features.length > 1 && typeof fIdx === "number") {
+                const nextFeatures = targetLayer.features.filter((_: any, index: number) => index !== fIdx);
+                updated[lIdx] = { ...targetLayer, features: nextFeatures };
+              } else {
+                updated.splice(lIdx, 1);
               }
-            },
-            updateTriggers: {
-              getSize: [selectedLayerIndex],
-            },
-          })
+              setMapFeatures(updated);
+              setSelectedLayerIndex(null);
+              setHoverInfo(null);
+            } else if (interactionMode === "SELECT_LAYER") {
+              const lIdx = info.object.properties._layerIndex;
+              const featureCollection = mapFeatures[lIdx];
+              if (featureCollection) {
+                setSelectedLayerIndex(lIdx);
+                useChatStore.getState().addSelectedLayer(featureCollection);
+              }
+            }
+          },
+          updateTriggers: {
+            getSize: [selectedLayerIndex],
+          },
+        })
         : null;
 
       renderLayers.unshift(...(markerLayer ? [layer, markerLayer] : [layer]));
@@ -565,8 +1043,22 @@ export const DeckGLMap = () => {
       renderLayers.push(editableLayer);
     }
 
+    // Visualization layers (HexagonLayer, HeatmapLayer, GridLayer, etc.)
+    visualizationLayers.forEach((vl) => {
+      // Skip if already rendered via mapFeatures to prevent duplicate rendering
+      const alreadyInMapFeatures = mapFeatures.some(
+        (f: any) => f?.properties?.layerId === `duckdb_${vl.queryId}`
+      );
+      if (alreadyInMapFeatures) return;
+
+      const vizLayer = createVisualizationLayer(vl.layerType, vl.data, vl.queryId, vl.config);
+      if (vizLayer) {
+        renderLayers.push(vizLayer);
+      }
+    });
+
     return renderLayers;
-  }, [mapFeatures, hoverInfo, interactionMode, selectedLayerIndex, editMode, editableData, setMapFeatures, setSelectedLayerIndex, setHoverInfo]);
+  }, [mapFeatures, hoverInfo, interactionMode, selectedLayerIndex, editMode, editableData, setMapFeatures, setSelectedLayerIndex, setHoverInfo, visualizationLayers, mapFeatureLayerTypes, mapFeatureLayerConfigs, hiddenLayerIndexes, mapFeatureLayerStyles]);
 
 
   let interactionOverlayClasses = "pointer-events-none absolute inset-0 z-10 transition-all duration-300 ";
@@ -591,7 +1083,7 @@ export const DeckGLMap = () => {
   const onViewStateChange = (e: any) => setViewState(e.viewState);
 
   return (
-    <div ref={containerRef} className="relative w-full h-full">
+    <div ref={containerRef} className="relative w-full h-full overflow-hidden">
       <div className={interactionOverlayClasses} />
       {modeText && (
         <div className="absolute top-4 left-1/2 -translate-x-1/2 z-20 bg-background/90 backdrop-blur-md text-foreground px-4 py-2 rounded-full text-[13px] font-semibold shadow-lg border border-border/50 animate-in slide-in-from-top-4 pointer-events-none">
@@ -615,7 +1107,7 @@ export const DeckGLMap = () => {
           zIndex: 0,
         }}
       />
-      
+
       <DeckGL
         viewState={viewState}
         onViewStateChange={onViewStateChange}
@@ -636,54 +1128,105 @@ export const DeckGLMap = () => {
         }}
       />
 
-      {/* Hover Tooltip */}
-      {hoverInfo && hoverInfo.props && Object.keys(hoverInfo.props).length > 2 && (
-        <div
-          className="fixed z-50 pointer-events-none px-3 py-2 bg-background/95 backdrop-blur-sm border border-border rounded-md shadow-lg text-xs font-medium animate-in fade-in zoom-in-95 duration-100 min-w-[200px] max-w-[300px] max-h-[300px] overflow-y-auto flex flex-col gap-1 scrollbar-thin scrollbar-thumb-muted-foreground/20"
-          style={{
-            left: hoverInfo.x + 15,
-            top: hoverInfo.y + 15,
-          }}
-        >
-          {(() => {
-            const p = hoverInfo.props || {};
-            const title = p.name || p.instruction || p.title || p.Name || "Map Feature";
-            const subtitle = p.full_address || p.place_formatted || p.Address || "";
-            const category = p.poi_category
-              ? (Array.isArray(p.poi_category) ? p.poi_category.join(", ") : p.poi_category)
-              : p.feature_type;
-            const distance = p.distance ? `${(p.distance / 1000).toFixed(2)} km` : null;
+      {/* Hover or Locked Tooltip */}
+      {(() => {
+        const activeInfo = hoverInfo || lockedHoverInfo;
+        if (!activeInfo || !activeInfo.props || Object.keys(activeInfo.props).length <= 2) return null;
 
-            const skipKeys = ['name', 'instruction', 'title', 'Name', 'full_address', 'place_formatted', 'Address', 'poi_category', 'feature_type', 'distance', 'geometry', 'id', 'mapbox_id', '_layerIndex', '_featureIndex'];
-            const extraProps = Object.entries(p).filter(([k, v]) => !skipKeys.includes(k) && typeof v !== 'object' && v !== null && v !== '');
+        let tooltipX = activeInfo.x;
+        let tooltipY = activeInfo.y;
 
-            return (
-              <div className="flex flex-col gap-1.5">
-                <div className="font-semibold text-[13px] leading-tight text-primary">{title}</div>
-                {subtitle && <div className="text-muted-foreground text-[10px] leading-tight">{subtitle}</div>}
+        // If it's locked and we have geographic coordinates, dynamically project them
+        if (activeInfo === lockedHoverInfo && lockedHoverInfo.lng !== undefined && lockedHoverInfo.lat !== undefined) {
+          const viewport = new WebMercatorViewport({
+            width: viewportSize.width || (typeof window !== "undefined" ? window.innerWidth : 800),
+            height: viewportSize.height || (typeof window !== "undefined" ? window.innerHeight : 600),
+            longitude: viewState.longitude,
+            latitude: viewState.latitude,
+            zoom: viewState.zoom,
+            pitch: viewState.pitch,
+            bearing: viewState.bearing
+          });
+          const [px, py] = viewport.project([lockedHoverInfo.lng, lockedHoverInfo.lat]);
+          tooltipX = px;
+          tooltipY = py;
+        }
 
-                {(category || distance) && (
-                  <div className="flex items-center flex-wrap gap-1.5 mt-1 pt-1.5 border-t border-border/50">
-                    {category && <span className="text-[9px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded capitalize">{category}</span>}
-                    {distance && <span className="text-[9px] font-medium bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded">Dist: {distance}</span>}
-                  </div>
-                )}
+        return (
+          <div
+            className={`fixed z-[100] px-3 py-2 bg-background/95 backdrop-blur-sm border border-border rounded-md shadow-lg text-xs font-medium animate-in fade-in zoom-in-95 duration-100 min-w-[200px] max-w-[300px] max-h-[300px] overflow-y-auto flex flex-col gap-1 scrollbar-thin scrollbar-thumb-muted-foreground/20 ${activeInfo === lockedHoverInfo ? 'pointer-events-auto' : 'pointer-events-none'}`}
+            style={{
+              left: tooltipX + 15,
+              top: tooltipY + 15,
+            }}
+          >
+            {(() => {
+              const p = activeInfo.props || {};
+              const title = p.name || p.instruction || p.title || p.Name || "Map Feature";
+              const subtitle = p.full_address || p.place_formatted || p.Address || "";
+              const category = p.poi_category
+                ? (Array.isArray(p.poi_category) ? p.poi_category.join(", ") : p.poi_category)
+                : p.feature_type;
+              const distance = p.distance ? `${(p.distance / 1000).toFixed(2)} km` : null;
 
-                {extraProps.length > 0 && (
-                  <div className="mt-1 pt-1.5 border-t border-border/50 flex flex-col gap-1">
-                    {extraProps.map(([k, v]) => (
-                      <div key={k} className="flex justify-between gap-3 text-[10px]">
-                        <span className="text-muted-foreground capitalize shrink-0">{k.replace(/_/g, ' ')}:</span>
-                        <span className="text-foreground text-right truncate" title={String(v)}>{String(v)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-        </div>
+              const skipKeys = ['name', 'instruction', 'title', 'Name', 'full_address', 'place_formatted', 'Address', 'poi_category', 'feature_type', 'distance', 'geometry', 'id', 'mapbox_id', '_layerIndex', '_featureIndex'];
+              const extraProps = Object.entries(p).filter(([k, v]) => !skipKeys.includes(k) && typeof v !== 'object' && v !== null && v !== '');
+
+              return (
+                <div className="flex flex-col gap-1.5 relative">
+                  {activeInfo === lockedHoverInfo && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setLockedHoverInfo(null);
+                      }}
+                      className="absolute -top-1 -right-1 p-1 bg-muted/50 hover:bg-muted text-muted-foreground hover:text-foreground rounded-full transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+                    </button>
+                  )}
+                  <div className="font-semibold text-[13px] leading-tight text-primary pr-4">{title}</div>
+                  {subtitle && <div className="text-muted-foreground text-[10px] leading-tight">{subtitle}</div>}
+
+                  {(category || distance) && (
+                    <div className="flex items-center flex-wrap gap-1.5 mt-1 pt-1.5 border-t border-border/50">
+                      {category && <span className="text-[9px] font-medium bg-primary/10 text-primary px-1.5 py-0.5 rounded capitalize">{category}</span>}
+                      {distance && <span className="text-[9px] font-medium bg-secondary text-secondary-foreground px-1.5 py-0.5 rounded">Dist: {distance}</span>}
+                    </div>
+                  )}
+
+                  {extraProps.length > 0 && (
+                    <div className="mt-1 pt-1.5 border-t border-border/50 flex flex-col gap-1">
+                      {extraProps.map(([k, v]) => (
+                        <div key={k} className="flex justify-between gap-3 text-[10px]">
+                          <span className="text-muted-foreground capitalize shrink-0">{k.replace(/_/g, ' ')}:</span>
+                          <span className="text-foreground text-right truncate" title={String(v)}>{String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })()}
+
+      {/* Map Right-Click Context Menu */}
+      {contextMenu && (
+        <MapContextMenu
+          isOpen={contextMenu.isOpen}
+          x={contextMenu.x}
+          y={contextMenu.y}
+          lng={contextMenu.lng}
+          lat={contextMenu.lat}
+          onClose={() => setContextMenu(null)}
+          onSqlQuery={handleSqlQueryFromContextMenu}
+        />
       )}
+
+      {/* Floating SQL Chat Window */}
+      <MapSQLChat />
     </div>
   );
 };

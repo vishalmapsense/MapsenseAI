@@ -12,6 +12,8 @@ import { NAVIGATION_TOOLS } from "./navigation";
 import { LAYER_TOOLS } from "./layers";
 import { DRAWING_TOOLS } from "./drawing";
 import { INTERACTION_TOOLS } from "./interaction";
+import { DUCKDB_CLIENT_TOOLS } from "./duckdb";
+import { STYLING_TOOLS } from "./styling";
 import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "@/config/clientTools/types";
 import type { MCPTool } from "@/types/mcp.types";
 
@@ -22,6 +24,8 @@ export const CLIENT_TOOL_DEFINITIONS: ClientToolDefinition[] = [
   ...LAYER_TOOLS,
   ...DRAWING_TOOLS,
   ...INTERACTION_TOOLS,
+  ...DUCKDB_CLIENT_TOOLS,
+  ...STYLING_TOOLS,
 ];
 
 // ─── JSON Schema → Gemini Schema Converter ────────────────────
@@ -141,4 +145,6 @@ export { NAVIGATION_TOOLS } from "./navigation";
 export { LAYER_TOOLS } from "./layers";
 export { DRAWING_TOOLS } from "./drawing";
 export { INTERACTION_TOOLS } from "./interaction";
+export { DUCKDB_CLIENT_TOOLS } from "./duckdb";
+export { STYLING_TOOLS } from "./styling";
 export type { ClientToolDefinition } from "./types";

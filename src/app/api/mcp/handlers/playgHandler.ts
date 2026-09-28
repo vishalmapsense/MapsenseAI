@@ -23,11 +23,11 @@ async function getPlaygMcpClient(): Promise<Client> {
     args: ["/Users/vishalkushwaha/Mapsense/MapsenseAI/playg-mcp-server/build/index.js"],
     env: {
       ...process.env,
-      PLAYG_API_BASE: "https://backend.mapsense.in/api",
+      PLAYG_API_BASE: "http://localhost:8000",
       USER_AGENT: "playg-mcp-server/1.0",
       REDIS_URL: "redis://localhost:6379",
-      BEARER_TOKEN: "",
-      INSTANCE_PATH: "",
+      BEARER_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig",
+      INSTANCE_PATH: "/Users/vishalkushwaha/test.duckdb",
       FILE_PATH: "",
     },
   });

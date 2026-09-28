@@ -24,6 +24,49 @@ export interface AgentEventInfo {
   tokens?: number;
 }
 
+/** Supported deck.gl visualization layer types */
+export type VisualizationLayerType =
+  | "GeoJsonLayer"       // Default — polygons, lines, points as-is
+  | "HexagonLayer"       // Density aggregation in hexagonal bins (3D)
+  | "HeatmapLayer"       // Smooth gradient density surface
+  | "GridLayer"          // Square grid aggregation
+  | "ScreenGridLayer"    // Screen-space grid (ultra fast for millions of points)
+  | "ScatterplotLayer"   // Simple circles for point data
+  | "ArcLayer"           // Origin→Destination arcs
+  | "PathLayer"          // GPS tracks, routes, multi-point lines
+  | "ColumnLayer"        // 3D columns at point locations
+  | "H3HexagonLayer"     // H3 hex index based hexagons
+  | "H3ClusterLayer"     // H3 hex cluster aggregation
+  | "GeohashLayer"       // Geohash-based grid cells
+  | "IconLayer"          // Point markers with icons
+  | "SolidPolygonLayer"  // Filled polygon rendering (no stroke)
+  | "ContourLayer";      // Contour/isoline density bands
+
+export interface SuggestedVisualizationLayer {
+  type: VisualizationLayerType;
+  label: string;           // Human-readable name, e.g. "3D Hexagon Grid"
+  description: string;     // Why this layer fits
+  isPrimary: boolean;      // AI's top recommendation
+}
+
+/** Tabular result from a DuckDB query — displayed in the client QueryResultsPanel. */
+export interface QueryResultData {
+  queryId: string;
+  queryText: string;
+  columns: string[];
+  rows: any[][];
+  rowCount: number;
+  totalRowCount: number;
+  truncated: boolean;
+  executionTimeMs?: number;
+  toolName: string;
+  timestamp: number;
+  hasSpatialColumn: boolean;
+  spatialColumnName?: string;
+  /** AI-recommended visualization layers for this query result */
+  suggestedLayers?: SuggestedVisualizationLayer[];
+}
+
 export interface ChatMessage {
   id: string;
   role: MessageRole;
@@ -35,6 +78,8 @@ export interface ChatMessage {
   agentEvents?: AgentEventInfo[];
   usage?: TokenUsage;
   executionMessages?: string[];
+  queryResults?: QueryResultData[];
+  suggestions?: string[];
 }
 
 // ─── MCP Tool Types ────────────────────────────────────────────

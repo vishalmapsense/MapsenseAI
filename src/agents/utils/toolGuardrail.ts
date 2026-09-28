@@ -28,6 +28,24 @@ export const GUARDED_TOOLS = new Set([
   "map_delete_geometry",
 ]);
 
+/**
+ * Maximum number of times a single tool can be called within one agent invocation.
+ * Prevents infinite retry loops where the LLM keeps calling the same tool.
+ */
+const MAX_TOOL_CALLS_PER_INVOCATION = 5;
+
+/**
+ * Per-invocation tool call counter.
+ * Tracks how many times each tool has been called in the current request.
+ * Must be reset at the start of each new request via resetToolCallCounters().
+ */
+const _toolCallCounts = new Map<string, number>();
+
+/** Reset tool call counters — call this at the start of each new request. */
+export function resetToolCallCounters(): void {
+  _toolCallCounts.clear();
+}
+
 /** Session state key prefix for tracking granted permissions */
 const GRANT_KEY_PREFIX = "_guard_granted:";
 
@@ -55,6 +73,21 @@ export const toolGuardrailCallback = async (params: {
 }): Promise<Record<string, unknown> | undefined> => {
   const toolName = params.tool?.name;
 
+  // 0. Hard Tool Call Limit: Prevent infinite retry loops
+  if (toolName) {
+    const count = (_toolCallCounts.get(toolName) || 0) + 1;
+    _toolCallCounts.set(toolName, count);
+    if (count > MAX_TOOL_CALLS_PER_INVOCATION) {
+      console.log(`⛔ [Guardrail] HARD LIMIT: Tool "${toolName}" called ${count} times (max: ${MAX_TOOL_CALLS_PER_INVOCATION}). Blocking.`);
+      return {
+        status: "BLOCKED_MAX_RETRIES",
+        error: `HARD SYSTEM LIMIT: You have already called "${toolName}" ${MAX_TOOL_CALLS_PER_INVOCATION} times in this request. ` +
+          `You MUST STOP retrying and return your best answer or error summary to the user NOW. ` +
+          `Do NOT attempt to call this tool again. Summarize what you tried and what failed.`,
+      };
+    }
+  }
+
   // 1. Hard Safety Limit Guardrail: Protect against unreasonable / system-crashing operations
   const limitArg = (params.args?.limit || params.args?.count || params.args?.maxResults || params.args?.batchSize) as number | undefined;
   if (limitArg && typeof limitArg === "number" && limitArg > 250) {
@@ -65,6 +98,32 @@ export const toolGuardrailCallback = async (params: {
         `Even if the user granted permission or requested it, you CANNOT run this request. ` +
         `You MUST inform the user politely that the system cannot execute more than 250 items/calls at once to prevent server degradation, and offer a smaller batch.`,
     };
+  }
+
+  // 1b. Disallowed Tools Guardrail: render_map_tool is for Claude iframe, not Mapsense
+  if (toolName === "render_map_tool" || toolName === "static_map_image_tool") {
+    console.log(`⛔ [Guardrail] DISALLOWED TOOL: "${toolName}" is blocked in MapsenseAI.`);
+    return {
+      status: "BLOCKED_DISALLOWED_TOOL",
+      error: `The tool "${toolName}" is disabled in MapsenseAI. Do NOT attempt to render maps or call this tool. ` +
+        `Spatial data is automatically intercepted and rendered onto the DeckGL map by the system. ` +
+        `Simply return your technical findings/summary to planner_agent.`,
+    };
+  }
+
+  // 1c. DuckDB Engine Guardrail: Intercept backend run_duck_db_queries targeting client-side map layers
+  if (toolName === "run_duck_db_queries") {
+    const queryText = (params.args?.queryText as string) || "";
+    const isClientTable = /\b(map_features|layers|layer_\d+|nawabganj[_\w]*)\b/i.test(queryText);
+    if (isClientTable) {
+      console.log(`⛔ [Guardrail] BLOCKED run_duck_db_queries targeting client map layer: "${queryText}".`);
+      return {
+        status: "BLOCKED_WRONG_DUCKDB_ENGINE",
+        error: `WRONG DUCKDB ENGINE: The table referenced in your SQL query is a client-side map layer in the user's browser. ` +
+          `It does NOT exist on the backend database. You MUST call "run_client_duckdb_query" with this query instead of "run_duck_db_queries". ` +
+          `Client DuckDB-Wasm already has this layer loaded in the browser. Call "run_client_duckdb_query" now.`,
+      };
+    }
   }
 
   if (!toolName || !GUARDED_TOOLS.has(toolName)) {
@@ -94,32 +153,14 @@ export const toolGuardrailCallback = async (params: {
 };
 
 /**
- * afterToolCallback for `request_user_permission` — sets the grant flag
- * in session state when the agent requests permission for a guarded tool.
+ * NOTE: permissionGrantCallback was REMOVED.
+ * ─────────────────────────────────────────────────────────────
+ * The grant flag is now set in route.ts ONLY when the user
+ * actually responds to the permission modal (not eagerly when
+ * the agent calls request_user_permission).
  *
- * This runs AFTER request_user_permission is "executed" (it's a client tool,
- * so it just returns a placeholder). The grant flag is set here so that
- * when the user responds (next invocation), the guarded tool is unblocked.
+ * This prevents:
+ *  1. Actions executing before the user grants permission
+ *  2. Infinite permission loops on subsequent turns
+ * ─────────────────────────────────────────────────────────────
  */
-export const permissionGrantCallback = async (params: {
-  tool: BaseTool;
-  args: Record<string, unknown>;
-  context: any; // ADK Context
-  response: Record<string, unknown>;
-}): Promise<Record<string, unknown> | undefined> => {
-  if (params.tool?.name !== "request_user_permission") {
-    return undefined; // Not our tool — pass through
-  }
-
-  const forTool = params.args?.for_tool as string | undefined;
-  if (forTool && GUARDED_TOOLS.has(forTool)) {
-    const key = grantKey(forTool);
-    const state = params.context?.state;
-    if (state) {
-      state[key] = true;
-      console.log(`🔑 [Guardrail] Permission flag SET for "${forTool}" — will be allowed on next invocation.`);
-    }
-  }
-
-  return undefined; // Don't modify the tool response
-};

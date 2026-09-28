@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { globalSessionService } from "../../route";
 import { createClient } from "@/utils/supabase/server";
 import { cookies } from "next/headers";
+import { cleanMessageContent, isInternalOrEmptyMessage } from "@/utils/messageCleaner";
+import { enrichQueryResultWithSpatial } from "@/utils/spatialQueryHelper";
+import type { QueryResultData } from "@/types/mcp.types";
 
 export async function GET(
   req: NextRequest,
@@ -46,17 +49,21 @@ export async function GET(
             if (part.text) text += part.text;
           }
           if (text) {
-            messages.push({
-              id: event.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              role: event.author === "user" ? "user" : "assistant",
-              content: text,
-            });
+            const role = event.author === "user" ? "user" : "assistant";
+            const cleaned = cleanMessageContent(text);
+            if (cleaned && !isInternalOrEmptyMessage(role, text)) {
+              messages.push({
+                id: event.id || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                role,
+                content: cleaned,
+              });
+            }
           }
         }
       }
     }
 
-    // Fetch layers for the shared session
+    // Fetch layers for the shared session (resolving storage files if needed)
     const { data: layerRecords } = await supabase
       .from("session_layers")
       .select("geojson, layer_index")
@@ -64,13 +71,69 @@ export async function GET(
       .eq("session_id", shareRecord.session_id)
       .order("layer_index", { ascending: true });
 
-    const layers = (layerRecords || []).map((l: any) => l.geojson);
+    const layers = await Promise.all(
+      (layerRecords || []).map(async (l: any) => {
+        if (l.geojson?._is_storage && l.geojson?._storage_path) {
+          try {
+            const { data: fileData, error: downloadErr } = await supabase.storage
+              .from("session-layers")
+              .download(l.geojson._storage_path);
+            if (!downloadErr && fileData) {
+              const text = await fileData.text();
+              return JSON.parse(text);
+            }
+          } catch (e) {
+            console.warn("[Share API] Could not resolve storage layer:", e);
+          }
+        }
+        return l.geojson;
+      })
+    );
+
+    // Fetch query results for the shared session
+    console.log("[Share API] Fetching query results for session_id:", shareRecord.session_id);
+    const { data: queryResultRecords, error: queryResultError } = await supabase
+      .from("query_results")
+      .select("*")
+      .eq("session_id", shareRecord.session_id)
+      .order("timestamp", { ascending: false });
+
+    console.log("[Share API] Query Results fetched:", queryResultRecords?.length, "error:", queryResultError);
+
+    let finalQueryResults = queryResultRecords;
+    if (queryResultError) {
+      if (queryResultError.code === "42P01" || queryResultError.code === "PGRST204") {
+        console.warn("query_results table does not exist yet. Returning empty query results for shared session.");
+        finalQueryResults = [];
+      } else {
+        throw queryResultError;
+      }
+    }
+
+    const queryResults = (finalQueryResults || []).map((row: any) => {
+      const baseResult: QueryResultData = {
+        queryId: row.query_id,
+        queryText: row.query_text,
+        columns: row.columns,
+        rows: row.rows,
+        rowCount: row.row_count,
+        totalRowCount: row.total_row_count,
+        truncated: row.truncated,
+        executionTimeMs: row.execution_time_ms,
+        toolName: row.tool_name,
+        timestamp: row.timestamp,
+        hasSpatialColumn: row.has_spatial_column,
+        spatialColumnName: row.spatial_column_name,
+      };
+      return enrichQueryResultWithSpatial(baseResult);
+    });
 
     return NextResponse.json({
       success: true,
       title: shareRecord.title || session.state?.title || "Shared Chat",
       messages,
       layers,
+      queryResults,
       updatedAt: session.lastUpdateTime || Date.now()
     });
 

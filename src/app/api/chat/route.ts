@@ -120,6 +120,9 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   map_split_polygon: "SPLIT_POLYGON",
   map_merge_polygons: "MERGE_POLYGONS",
   request_user_permission: "REQUEST_PERMISSION",
+  run_client_duckdb_query: "RUN_CLIENT_DUCKDB_QUERY",
+  map_style_layer: "STYLE_LAYER",
+  map_clear_layer_style: "CLEAR_LAYER_STYLE",
 };
 
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────

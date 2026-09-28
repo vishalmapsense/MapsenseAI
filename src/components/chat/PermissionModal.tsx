@@ -11,8 +11,14 @@ export const PermissionModal: React.FC = () => {
   if (!permissionRequest) return null;
 
   const handleOptionClick = (option: string) => {
+    const forTool = permissionRequest.for_tool || "";
     clearPermissionRequest();
-    sendMessage(option);
+    // Prefix with metadata so the server knows this is a permission response
+    // and can set the grant flag for the correct guarded tool
+    const prefixedMessage = forTool
+      ? `[PERMISSION_RESPONSE:${forTool}] ${option}`
+      : option;
+    sendMessage(prefixedMessage);
   };
 
   const handleCancel = () => {
@@ -102,3 +108,4 @@ export const PermissionModal: React.FC = () => {
     </div>
   );
 };
+

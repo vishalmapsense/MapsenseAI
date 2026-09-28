@@ -34,29 +34,75 @@ export interface AIModel {
 }
 
 export const ALL_MODELS: AIModel[] = [
-  // ── Free Models ──────────────────────────────────────────────
+  // ── Google Gemini Models (Direct AI Studio Integration) ───────────
   {
     id: "gemini-3.5-flash",
     name: "Gemini 3.5 Flash",
     provider: "google",
-    description: "Google's latest and fastest model. Perfect for quick and reliable responses.",
+    description: "Google's latest flagship flash model with high rate limits and fast, intelligent multimodal reasoning.",
+    contextWindow: "1M tokens",
+    isFree: true,
+    requiresApiKey: true,
+    apiKeyLabel: "Google AI Studio API Key",
+    badge: "Smart",
+  },
+  {
+    id: "gemini-3.5-flash-lite",
+    name: "Gemini 3.5 Flash-Lite",
+    provider: "google",
+    description: "Ultra-fast, high-throughput model with generous free quotas. Best for quick geospatial tasks.",
     contextWindow: "1M tokens",
     isFree: true,
     requiresApiKey: true,
     apiKeyLabel: "Google AI Studio API Key",
     badge: "Fast",
+  },
+  {
+    id: "gemini-3.1-flash-lite",
+    name: "Gemini 3.1 Flash Lite",
+    provider: "google",
+    description: "Lightweight Gemini 3.1 model optimized for simple workflows.",
+    contextWindow: "1M tokens",
+    isFree: true,
+    requiresApiKey: true,
+    apiKeyLabel: "Google AI Studio API Key",
+    badge: "Fast",
+  },
+  {
+    id: "gemini-3.8-flash",
+    name: "Gemini 3.8 Flash",
+    provider: "google",
+    description: "High-performance Gemini 3.8 model with state-of-the-art reasoning.",
+    contextWindow: "1M tokens",
+    isFree: true,
+    requiresApiKey: true,
+    apiKeyLabel: "Google AI Studio API Key",
+    badge: "Powerful",
   },
   {
     id: "gemini-2.5-flash",
     name: "Gemini 2.5 Flash",
     provider: "google",
-    description: "Highly capable Google model for everyday tasks with a large context window.",
+    description: "Legacy 2.5 model. Note: Google AI Studio restricts this model to only 20 requests/day on the free tier.",
     contextWindow: "1M tokens",
     isFree: true,
     requiresApiKey: true,
     apiKeyLabel: "Google AI Studio API Key",
     badge: "Fast",
   },
+  {
+    id: "gemini-3.1-pro-preview",
+    name: "Gemini 3.1 Pro",
+    provider: "google",
+    description: "Google's advanced reasoning model for deep analysis and complex workflows.",
+    contextWindow: "2M tokens",
+    isFree: false,
+    requiresApiKey: true,
+    apiKeyLabel: "Google AI Studio API Key",
+    badge: "Smart",
+  },
+
+  // ── Open Source & Alternate Providers ─────────────────────────
   {
     id: "llama-3.3-70b-versatile",
     name: "Llama 3.3 70B (Groq)",
@@ -115,8 +161,6 @@ export const ALL_MODELS: AIModel[] = [
     badge: "Local",
     isDisabled: true,
   },
-
-  // ── Paid Models ───────────────────────────────────────────────
   {
     id: "gpt-4o",
     name: "GPT-4o",
@@ -153,17 +197,6 @@ export const ALL_MODELS: AIModel[] = [
     badge: "Smart",
     isDisabled: true,
   },
-  {
-    id: "gemini-3.1-flash-lite",
-    name: "Gemini 3.1 Flash Lite",
-    provider: "google",
-    description: "Lightweight model designed for simple and fast tasks.",
-    contextWindow: "1M tokens",
-    isFree: false,
-    requiresApiKey: true,
-    apiKeyLabel: "Google AI Studio API Key",
-    badge: "Fast",
-  },
 ];
 
 // ─── Provider API Key Labels ───────────────────────────────────
@@ -184,10 +217,12 @@ interface ModelSettingsState {
   selectedModelId: string;
   apiKeys: Partial<Record<ModelProvider, string>>;
   ollamaBaseUrl: string;
+  isSettingsOpen: boolean;
 
   setSelectedModel: (id: string) => void;
   setApiKey: (provider: ModelProvider, key: string) => void;
   setOllamaBaseUrl: (url: string) => void;
+  setSettingsOpen: (open: boolean) => void;
   getSelectedModel: () => AIModel | undefined;
   getApiKeyForModel: (model: AIModel) => string;
 }
@@ -195,9 +230,10 @@ interface ModelSettingsState {
 export const useModelSettingsStore = create<ModelSettingsState>()(
   persist(
     (set, get) => ({
-      selectedModelId: "gemini-3.5-flash", // Default: free model
+      selectedModelId: "gemini-3.5-flash", // Default: high-quota flash model
       apiKeys: {},
       ollamaBaseUrl: "http://localhost:11434",
+      isSettingsOpen: false,
 
       setSelectedModel: (id) => set({ selectedModelId: id }),
 
@@ -208,20 +244,34 @@ export const useModelSettingsStore = create<ModelSettingsState>()(
 
       setOllamaBaseUrl: (url) => set({ ollamaBaseUrl: url }),
 
+      setSettingsOpen: (open) => set({ isSettingsOpen: open }),
+
       getSelectedModel: () => {
         const { selectedModelId } = get();
-        return ALL_MODELS.find((m) => m.id === selectedModelId);
+        // Automatically migrate away from 20 req/day limited gemini-2.5-flash
+        const effectiveId =
+          selectedModelId === "gemini-2.5-flash"
+            ? "gemini-3.5-flash"
+            : selectedModelId;
+        return (
+          ALL_MODELS.find((m) => m.id === effectiveId) ||
+          ALL_MODELS[0]
+        );
       },
 
       getApiKeyForModel: (model) => {
         const { apiKeys } = get();
-        return apiKeys[model.provider] ?? "";
+        return (apiKeys[model.provider] ?? "").trim();
       },
     }),
     {
       name: "mapsense-model-settings",
-      // API keys are sensitive — stored in localStorage only
-      // For production: consider encryption or server-side storage
+      // Exclude ephemeral isSettingsOpen from persisted localStorage
+      partialize: (state) => ({
+        selectedModelId: state.selectedModelId,
+        apiKeys: state.apiKeys,
+        ollamaBaseUrl: state.ollamaBaseUrl,
+      }),
     }
   )
 );
