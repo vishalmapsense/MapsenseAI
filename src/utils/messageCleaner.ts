@@ -7,6 +7,8 @@ export function cleanMessageContent(text: string): string {
   return text
     .replace(/\[MAP_SQL_CONTEXT\][\s\S]*?\[\/MAP_SQL_CONTEXT\]/gi, "")
     .replace(/\[MAP_SQL_CONTEXT\][\s\S]*/gi, "")
+    .replace(/\[ACTIVE_MAP_LAYERS\][\s\S]*?\[\/ACTIVE_MAP_LAYERS\]/gi, "")
+    .replace(/\[ACTIVE_MAP_LAYERS\][\s\S]*/gi, "")
     .replace(/\[SELECTED_MAP_LAYERS\][\s\S]*?\[\/SELECTED_MAP_LAYERS\]/gi, "")
     .replace(/\[SELECTED_MAP_LAYERS\][\s\S]*/gi, "")
     .replace(/\[ATTACHED_BOUNDARY_CONTEXT\][\s\S]*?\[\/ATTACHED_BOUNDARY_CONTEXT\]/gi, "")
