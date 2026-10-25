@@ -60,6 +60,8 @@ import {
   parseNumericValue,
   hashStringToColor,
   interpolateGradient,
+  parseRGBAColor,
+  CURATED_PALETTES,
 } from "@/utils/propertyResolver";
 import {
   evaluateStyleRule,
@@ -187,9 +189,9 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
       if (style.rules && Array.isArray(style.rules)) {
         for (const r of style.rules) {
           if (evaluateStyleRule(props, r)) {
-            if (r.fillColor) return r.fillColor;
+            if (r.fillColor) return parseRGBAColor(r.fillColor);
             const entry = style.mapping?.[r.category];
-            if (entry?.fillColor) return entry.fillColor;
+            if (entry?.fillColor) return parseRGBAColor(entry.fillColor);
             return hashStringToColor(r.category, style.palette);
           }
         }
@@ -200,7 +202,7 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
         const matched = matchValueGroup(props, style.valueGroups, style.sourceField || style.field);
         if (matched) {
           const entry = style.mapping?.[matched];
-          if (entry?.fillColor) return entry.fillColor;
+          if (entry?.fillColor) return parseRGBAColor(entry.fillColor);
           return hashStringToColor(matched, style.palette);
         }
       }
@@ -219,14 +221,14 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
             const maxOk = r.max === undefined || numVal < r.max;
             if (minOk && maxOk) {
               const exact = style.mapping?.[r.category];
-              if (exact?.fillColor) return exact.fillColor;
+              if (exact?.fillColor) return parseRGBAColor(exact.fillColor);
               const lowerCat = r.category.toLowerCase();
               const lowerEntry = style.mapping?.[lowerCat];
-              if (lowerEntry?.fillColor) return lowerEntry.fillColor;
+              if (lowerEntry?.fillColor) return parseRGBAColor(lowerEntry.fillColor);
               if (style.mapping) {
                 for (const k in style.mapping) {
                   if (k.toLowerCase() === lowerCat && style.mapping[k]?.fillColor) {
-                    return style.mapping[k].fillColor;
+                    return parseRGBAColor(style.mapping[k].fillColor);
                   }
                 }
               }
@@ -245,20 +247,28 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
         const key = String(val).trim();
         // Fast exact match
         const exact = style.mapping?.[key];
-        if (exact?.fillColor) return exact.fillColor;
+        if (exact?.fillColor) return parseRGBAColor(exact.fillColor);
 
         // Case-insensitive match
         const lowerKey = key.toLowerCase();
         if (style.mapping) {
           for (const k in style.mapping) {
-            if (k.toLowerCase() === lowerKey) {
+            if (k.toLowerCase().trim() === lowerKey) {
               const entry = style.mapping[k];
-              if (entry?.fillColor) return entry.fillColor;
+              if (entry?.fillColor) return parseRGBAColor(entry.fillColor);
             }
           }
         }
 
-        // Resilient fallback: auto-assign deterministic distinct color from palette!
+        // If explicit mapping is provided, unmatched items follow dim/hide/defaultColor or deterministic slate
+        if (style.mapping && Object.keys(style.mapping).length > 0) {
+          if (style.hideUnmatched) return [0, 0, 0, 0];
+          if (style.dimUnmatched) return [160, 160, 160, 30];
+          if (style.defaultColor) return parseRGBAColor(style.defaultColor);
+          return [148, 163, 184, 160];
+        }
+
+        // Fallback for auto-discovered categorical styling when mapping is empty
         return hashStringToColor(key, style.palette);
       }
 
@@ -268,7 +278,7 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
         const matchedRegion = autoClassifyIndiaRegion(props, targetCats);
         if (matchedRegion) {
           const entry = style.mapping[matchedRegion];
-          if (entry?.fillColor) return entry.fillColor;
+          if (entry?.fillColor) return parseRGBAColor(entry.fillColor);
           return hashStringToColor(matchedRegion, style.palette);
         }
       }
@@ -280,7 +290,7 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
           const sVal = String(pv).trim().toLowerCase();
           for (const [mk, me] of Object.entries(style.mapping)) {
             if (mk.toLowerCase() === sVal && me?.fillColor) {
-              return me.fillColor;
+              return parseRGBAColor(me.fillColor);
             }
           }
         }
@@ -289,16 +299,19 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
       // 7. Filtering / unmatched fallbacks
       if (style.hideUnmatched) return [0, 0, 0, 0];
       if (style.dimUnmatched) return [160, 160, 160, 30];
-      return style.defaultColor || [148, 163, 184, 100];
+      return style.defaultColor ? parseRGBAColor(style.defaultColor) : [148, 163, 184, 100];
     }
     case "gradient": {
       const rawVal = resolveFeaturePropertyValue(props, style.field);
       const val = parseNumericValue(rawVal);
-      if (val === null || isNaN(val)) return style.minColor;
-      return interpolateGradient(val, style.min, style.max, style.minColor, style.maxColor);
+      const stops = (style as any).colorRange || (style.palette ? CURATED_PALETTES[style.palette.toLowerCase()] : null);
+      if (val === null || isNaN(val)) {
+        return stops ? parseRGBAColor(stops[0]) : parseRGBAColor(style.minColor);
+      }
+      return interpolateGradient(val, style.min, style.max, style.minColor, style.maxColor, stops);
     }
     case "solid":
-      return style.fillColor;
+      return parseRGBAColor(style.fillColor);
     default:
       return null;
   }
@@ -309,17 +322,27 @@ const resolveStyleFillColor = (props: Record<string, any>, style: LayerStyle): R
  * Returns null if no style applies.
  */
 const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): RGBAColor | null => {
+  if (style.lineColor) {
+    return parseRGBAColor(style.lineColor);
+  }
+
   switch (style.type) {
     case "category": {
       // 1. Rules evaluation
       if (style.rules && Array.isArray(style.rules)) {
         for (const r of style.rules) {
           if (evaluateStyleRule(props, r)) {
-            if (r.lineColor) return r.lineColor;
-            if (r.fillColor) return [r.fillColor[0], r.fillColor[1], r.fillColor[2], 255];
+            if (r.lineColor) return parseRGBAColor(r.lineColor);
+            if (r.fillColor) {
+              const f = parseRGBAColor(r.fillColor);
+              return [f[0], f[1], f[2], 255];
+            }
             const entry = style.mapping?.[r.category];
-            if (entry?.lineColor) return entry.lineColor;
-            if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+            if (entry?.lineColor) return parseRGBAColor(entry.lineColor);
+            if (entry?.fillColor) {
+              const f = parseRGBAColor(entry.fillColor);
+              return [f[0], f[1], f[2], 255];
+            }
             const h = hashStringToColor(r.category, style.palette);
             return [h[0], h[1], h[2], 255];
           }
@@ -331,8 +354,11 @@ const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): R
         const matched = matchValueGroup(props, style.valueGroups, style.sourceField || style.field);
         if (matched) {
           const entry = style.mapping?.[matched];
-          if (entry?.lineColor) return entry.lineColor;
-          if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+          if (entry?.lineColor) return parseRGBAColor(entry.lineColor);
+          if (entry?.fillColor) {
+            const f = parseRGBAColor(entry.fillColor);
+            return [f[0], f[1], f[2], 255];
+          }
           const h = hashStringToColor(matched, style.palette);
           return [h[0], h[1], h[2], 255];
         }
@@ -352,12 +378,18 @@ const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): R
             const maxOk = r.max === undefined || numVal < r.max;
             if (minOk && maxOk) {
               const exact = style.mapping?.[r.category];
-              if (exact?.lineColor) return exact.lineColor;
-              if (exact?.fillColor) return [exact.fillColor[0], exact.fillColor[1], exact.fillColor[2], 255];
+              if (exact?.lineColor) return parseRGBAColor(exact.lineColor);
+              if (exact?.fillColor) {
+                const f = parseRGBAColor(exact.fillColor);
+                return [f[0], f[1], f[2], 255];
+              }
               const lowerCat = r.category.toLowerCase();
               const lowerEntry = style.mapping?.[lowerCat];
-              if (lowerEntry?.lineColor) return lowerEntry.lineColor;
-              if (lowerEntry?.fillColor) return [lowerEntry.fillColor[0], lowerEntry.fillColor[1], lowerEntry.fillColor[2], 255];
+              if (lowerEntry?.lineColor) return parseRGBAColor(lowerEntry.lineColor);
+              if (lowerEntry?.fillColor) {
+                const f = parseRGBAColor(lowerEntry.fillColor);
+                return [f[0], f[1], f[2], 255];
+              }
             }
           }
         }
@@ -371,19 +403,32 @@ const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): R
       if (val !== undefined && val !== null) {
         const key = String(val).trim();
         const exactEntry = style.mapping?.[key];
-        if (exactEntry?.lineColor) return exactEntry.lineColor;
+        if (exactEntry?.lineColor) return parseRGBAColor(exactEntry.lineColor);
         if (exactEntry?.fillColor) {
-          return [exactEntry.fillColor[0], exactEntry.fillColor[1], exactEntry.fillColor[2], 255];
+          const f = parseRGBAColor(exactEntry.fillColor);
+          return [f[0], f[1], f[2], 255];
         }
         const lowerKey = key.toLowerCase();
         if (style.mapping) {
           for (const k in style.mapping) {
             if (k.toLowerCase() === lowerKey) {
               const entry = style.mapping[k];
-              if (entry?.lineColor) return entry.lineColor;
-              if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+              if (entry?.lineColor) return parseRGBAColor(entry.lineColor);
+              if (entry?.fillColor) {
+                const f = parseRGBAColor(entry.fillColor);
+                return [f[0], f[1], f[2], 255];
+              }
             }
           }
+        }
+        if (style.mapping && Object.keys(style.mapping).length > 0) {
+          if (style.hideUnmatched) return [0, 0, 0, 0];
+          if (style.dimUnmatched) return [160, 160, 160, 50];
+          if (style.defaultColor) {
+            const dc = parseRGBAColor(style.defaultColor);
+            return [dc[0], dc[1], dc[2], 255];
+          }
+          return [148, 163, 184, 180];
         }
         const hashed = hashStringToColor(key, style.palette);
         return [hashed[0], hashed[1], hashed[2], 255];
@@ -394,14 +439,17 @@ const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): R
         const matchedRegion = autoClassifyIndiaRegion(props, Object.keys(style.mapping));
         if (matchedRegion) {
           const entry = style.mapping[matchedRegion];
-          if (entry?.lineColor) return entry.lineColor;
-          if (entry?.fillColor) return [entry.fillColor[0], entry.fillColor[1], entry.fillColor[2], 255];
+          if (entry?.lineColor) return parseRGBAColor(entry.lineColor);
+          if (entry?.fillColor) {
+            const f = parseRGBAColor(entry.fillColor);
+            return [f[0], f[1], f[2], 255];
+          }
         }
       }
 
       if (style.hideUnmatched) return [0, 0, 0, 0];
       if (style.dimUnmatched) return [160, 160, 160, 50];
-      const dc = style.defaultColor || [148, 163, 184, 100];
+      const dc = style.defaultColor ? parseRGBAColor(style.defaultColor) : [148, 163, 184, 100];
       return [dc[0], dc[1], dc[2], 255];
     }
     case "gradient": {
@@ -409,8 +457,14 @@ const resolveStyleLineColor = (props: Record<string, any>, style: LayerStyle): R
       if (fill) return [fill[0], fill[1], fill[2], 255];
       return null;
     }
-    case "solid":
-      return style.lineColor || (style.fillColor ? [style.fillColor[0], style.fillColor[1], style.fillColor[2], 255] : null);
+    case "solid": {
+      if (style.lineColor) return parseRGBAColor(style.lineColor);
+      if (style.fillColor) {
+        const f = parseRGBAColor(style.fillColor);
+        return [f[0], f[1], f[2], 255];
+      }
+      return null;
+    }
     default:
       return null;
   }
@@ -761,7 +815,7 @@ export const DeckGLMap = () => {
       const isVisible = !hiddenLayerIndexes.includes(layerIndex);
 
       // Check if this layer has a non-GeoJson type override
-      const layerType = mapFeatureLayerTypes[layerIndex];
+      const layerType = mapFeatureLayerTypes[layerIndex] || (normalized as any)?._layerType || (featureObj as any)?._layerType;
       if (layerType && layerType !== "GeoJsonLayer") {
         if (!isVisible) return;
         // Extract features as flat data for the visualization layer factory
@@ -781,7 +835,7 @@ export const DeckGLMap = () => {
             flatData.push({ ...props, geometry: f.geometry });
           }
         });
-        const config = mapFeatureLayerConfigs[layerIndex] || {};
+        const config = mapFeatureLayerConfigs[layerIndex] || (normalized as any)?._layerConfig || (featureObj as any)?._layerConfig || {};
         const vizLayer = createVisualizationLayer(layerType, flatData, `mapfeat-${layerIndex}`, config);
         if (vizLayer) {
           renderLayers.push(vizLayer);
@@ -798,19 +852,39 @@ export const DeckGLMap = () => {
         }));
       }
 
-      const pointMarkers = getPointMarkers(normalized, layerIndex);
+      // const pointMarkers = getPointMarkers(normalized, layerIndex);
+
+      const layerStyle = mapFeatureLayerStyles[layerIndex] || (normalized as any)?._layerStyle || (featureObj as any)?._layerStyle;
+      const isExtruded = Boolean(layerStyle?.extruded || layerStyle?.elevationField);
 
       const layer = new GeoJsonLayer({
         id: `geojson-layer-${layerIndex}`,
         data: normalized,
         visible: isVisible,
         pickable: isVisible,
-        stroked: true,
-        filled: true,
-        extruded: false,
+        stroked: layerStyle?.stroked ?? true,
+        filled: layerStyle?.filled ?? true,
+        extruded: isExtruded,
+        wireframe: layerStyle?.wireframe ?? false,
         pointType: 'circle',
         lineWidthScale: 1,
-        lineWidthMinPixels: 2,
+        lineWidthMinPixels: 1,
+        opacity: typeof layerStyle?.opacity === "number"
+          ? (layerStyle.opacity > 1 ? layerStyle.opacity / 255 : layerStyle.opacity)
+          : 1,
+        getElevation: (d: any) => {
+          if (layerStyle?.elevationField) {
+            const rawVal = resolveFeaturePropertyValue(d.properties, layerStyle.elevationField);
+            const val = parseNumericValue(rawVal);
+            if (val !== null && !isNaN(val)) {
+              return Math.max(0, val * (layerStyle.elevationScale ?? 1));
+            }
+          }
+          if (layerStyle?.extruded) {
+            return 50 * (layerStyle.elevationScale ?? 1);
+          }
+          return 0;
+        },
         getFillColor: (d: any) => {
           const activeInfo = hoverInfo || lockedHoverInfo;
           const isHovered = activeInfo?.props?._layerIndex === layerIndex &&
@@ -825,13 +899,51 @@ export const DeckGLMap = () => {
           if (interactionMode === "SELECT_LAYER") return [34, 197, 94, 70]; // green
 
           // Data-driven style takes precedence for layer fill color
-          const layerStyle = mapFeatureLayerStyles[layerIndex];
           if (layerStyle) {
             const styledColor = resolveStyleFillColor(d.properties, layerStyle);
             if (styledColor) return styledColor;
           }
 
           if (selectedLayerIndex === layerIndex) return [14, 165, 233, 90]; // sky
+
+          // Feature-level custom fill color
+          if (Array.isArray(d.properties?.fillColor)) return d.properties.fillColor;
+          if (Array.isArray(d.properties?.color)) return d.properties.color;
+
+          // Category-based dynamic coloring for amenities
+          const tag = String(
+            d.properties?.category ||
+            d.properties?.amenity ||
+            d.properties?.shop ||
+            d.properties?.leisure ||
+            d.properties?.highway ||
+            ""
+          ).toLowerCase();
+
+          if (tag.includes("hospital") || tag.includes("clinic") || tag.includes("pharmacy") || tag.includes("doctor") || tag.includes("health")) {
+            return [16, 185, 129, 230]; // Emerald Green
+          }
+          if (tag.includes("school") || tag.includes("college") || tag.includes("university") || tag.includes("education") || tag.includes("library")) {
+            return [79, 70, 229, 230]; // Indigo
+          }
+          if (tag.includes("bank") || tag.includes("atm") || tag.includes("financial")) {
+            return [59, 130, 246, 230]; // Blue
+          }
+          if (tag.includes("restaurant") || tag.includes("cafe") || tag.includes("food") || tag.includes("fast_food") || tag.includes("bar") || tag.includes("pub")) {
+            return [249, 115, 22, 230]; // Orange
+          }
+          if (tag.includes("supermarket") || tag.includes("grocery") || tag.includes("convenience") || tag.includes("mall") || tag.includes("shop") || tag.includes("retail")) {
+            return [168, 85, 247, 230]; // Purple
+          }
+          if (tag.includes("bus") || tag.includes("station") || tag.includes("transit") || tag.includes("fuel") || tag.includes("parking")) {
+            return [6, 182, 212, 230]; // Cyan
+          }
+          if (tag.includes("park") || tag.includes("garden") || tag.includes("playground") || tag.includes("sports") || tag.includes("recreation")) {
+            return [132, 204, 22, 230]; // Lime Green
+          }
+          if (tag.includes("police") || tag.includes("post_office") || tag.includes("townhall") || tag.includes("worship") || tag.includes("temple") || tag.includes("mosque") || tag.includes("church")) {
+            return [244, 63, 94, 230]; // Rose Red
+          }
 
           return [59, 130, 246, 50]; // default blue
         },
@@ -856,6 +968,10 @@ export const DeckGLMap = () => {
             if (styledColor) return styledColor;
           }
 
+          // Feature-level custom line color
+          if (Array.isArray(d.properties?.lineColor)) return d.properties.lineColor;
+          if (Array.isArray(d.properties?.strokeColor)) return d.properties.strokeColor;
+
           return [59, 130, 246, 255]; // default blue
         },
         getPointRadius: (d: any) => {
@@ -869,13 +985,19 @@ export const DeckGLMap = () => {
               return Math.min(maxR, Math.max(minR, minR + (val / 100) * (maxR - minR)));
             }
           }
-          return layerStyle?.pointRadius ?? (layerStyle ? 8 : 6);
+          // Layer style pointRadius (adjusted by user in Style panel or AI) takes precedence
+          if (typeof layerStyle?.pointRadius === "number") return layerStyle.pointRadius;
+          if (typeof d.properties?.pointRadius === "number") return d.properties.pointRadius;
+          if (typeof d.properties?.radius === "number") return d.properties.radius;
+          return 25; // Default 25px
         },
-        pointRadiusMinPixels: 3,
-        pointRadiusMaxPixels: 60,
-        getLineWidth: () => {
+        pointRadiusMinPixels: 2,
+        pointRadiusMaxPixels: 120,
+        getLineWidth: (d: any) => {
           if (selectedLayerIndex === layerIndex) return 5;
           const layerStyle = mapFeatureLayerStyles[layerIndex];
+          if (typeof layerStyle?.lineWidth === "number") return layerStyle.lineWidth;
+          if (typeof d.properties?.lineWidth === "number") return d.properties.lineWidth;
           return layerStyle?.lineWidth ?? 3;
         },
         onHover: (info: any) => {
@@ -892,8 +1014,8 @@ export const DeckGLMap = () => {
         updateTriggers: {
           getFillColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, lockedHoverInfo?.props?._layerIndex, lockedHoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex, highlightedFeatureId, mapFeatureLayerStyles[layerIndex]],
           getLineColor: [hoverInfo?.props?._layerIndex, hoverInfo?.props?._featureIndex, lockedHoverInfo?.props?._layerIndex, lockedHoverInfo?.props?._featureIndex, interactionMode, selectedLayerIndex, highlightedFeatureId, mapFeatureLayerStyles[layerIndex]],
-          getPointRadius: [mapFeatureLayerStyles[layerIndex]],
-          getLineWidth: [selectedLayerIndex, mapFeatureLayerStyles[layerIndex]],
+          getPointRadius: [mapFeatureLayerStyles[layerIndex]?.pointRadius, mapFeatureLayerStyles[layerIndex]?.sizeField, mapFeatureLayerStyles[layerIndex]],
+          getLineWidth: [selectedLayerIndex, mapFeatureLayerStyles[layerIndex]?.lineWidth, mapFeatureLayerStyles[layerIndex]],
         },
         onClick: (info: any) => {
           if (!info.object) {
@@ -926,6 +1048,7 @@ export const DeckGLMap = () => {
         }
       });
 
+      /* Marker IconLayer commented out — rendering clean circles via GeoJsonLayer only
       const hasActiveStyle = !!mapFeatureLayerStyles[layerIndex];
       const markerLayer = (pointMarkers.length > 0 && isVisible && !hasActiveStyle)
         ? new IconLayer({
@@ -985,8 +1108,9 @@ export const DeckGLMap = () => {
           },
         })
         : null;
+      */
 
-      renderLayers.unshift(...(markerLayer ? [layer, markerLayer] : [layer]));
+      renderLayers.unshift(layer);
     });
 
     // Editable layer for drawing

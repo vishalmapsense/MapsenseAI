@@ -38,7 +38,9 @@ export interface MapCommand {
     | "REQUEST_PERMISSION"
     | "RUN_CLIENT_DUCKDB_QUERY"
     | "STYLE_LAYER"
-    | "CLEAR_LAYER_STYLE";
+    | "CLEAR_LAYER_STYLE"
+    | "COMPARE_PINCODES"
+    | "SCORE_PINCODE";
   payload?: any;
 }
 
@@ -102,6 +104,8 @@ interface MapState {
   clearFeatures: () => void;
   triggerZoomToFit: () => void;
   setMapFeatures: (features: any[]) => void;
+  reorderLayers: (fromIndex: number, toIndex: number) => void;
+  removeLayer: (index: number) => void;
   setBaseMap: (baseMap: BaseMapType) => void;
   setMapViewState: (state: MapViewState) => void;
   setViewState: (state: Partial<DeckViewState>) => void;
@@ -158,14 +162,197 @@ export const useMapStore = create<MapState>((set) => ({
   clearFeatures: () => set({ mapFeatures: [], selectedLayerIndex: null, highlightedFeatureId: null, lockedHoverInfo: null, visualizationLayers: [], mapFeatureLayerTypes: {}, mapFeatureLayerConfigs: {}, mapFeatureLayerStyles: {}, activeStylePanelLayerIndex: null, hiddenLayerIndexes: [] }),
   triggerZoomToFit: () => set((state) => ({ zoomTrigger: state.zoomTrigger + 1 })),
   setMapFeatures: (features) =>
-    set((prev) => ({
-      mapFeatures: features,
-      selectedLayerIndex:
-        prev.selectedLayerIndex !== null && prev.selectedLayerIndex >= features.length
-          ? null
-          : prev.selectedLayerIndex,
-      hiddenLayerIndexes: prev.hiddenLayerIndexes.filter((idx) => idx < features.length),
-    })),
+    set((prev) => {
+      const newStyles: Record<number, LayerStyle> = {};
+      const newTypes: Record<number, VisualizationLayerType> = {};
+      const newConfigs: Record<number, any> = {};
+
+      features.forEach((feat, idx) => {
+        if (feat) {
+          if (feat._layerStyle) {
+            newStyles[idx] = feat._layerStyle;
+          } else if (
+            prev.mapFeatureLayerStyles[idx] &&
+            (features.length === prev.mapFeatures.length || feat === prev.mapFeatures[idx])
+          ) {
+            newStyles[idx] = prev.mapFeatureLayerStyles[idx];
+            feat._layerStyle = prev.mapFeatureLayerStyles[idx];
+          }
+
+          if (feat._layerType) {
+            newTypes[idx] = feat._layerType;
+          } else if (
+            prev.mapFeatureLayerTypes[idx] &&
+            (features.length === prev.mapFeatures.length || feat === prev.mapFeatures[idx])
+          ) {
+            newTypes[idx] = prev.mapFeatureLayerTypes[idx];
+            feat._layerType = prev.mapFeatureLayerTypes[idx];
+          }
+
+          if (feat._layerConfig) {
+            newConfigs[idx] = feat._layerConfig;
+          } else if (
+            prev.mapFeatureLayerConfigs[idx] &&
+            (features.length === prev.mapFeatures.length || feat === prev.mapFeatures[idx])
+          ) {
+            newConfigs[idx] = prev.mapFeatureLayerConfigs[idx];
+            feat._layerConfig = prev.mapFeatureLayerConfigs[idx];
+          }
+
+          if (!feat._layerId) {
+            feat._layerId = `layer-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 7)}`;
+          }
+        }
+      });
+
+      return {
+        mapFeatures: features,
+        mapFeatureLayerStyles: newStyles,
+        mapFeatureLayerTypes: newTypes,
+        mapFeatureLayerConfigs: newConfigs,
+        selectedLayerIndex:
+          prev.selectedLayerIndex !== null && prev.selectedLayerIndex >= features.length
+            ? null
+            : prev.selectedLayerIndex,
+        hiddenLayerIndexes: prev.hiddenLayerIndexes.filter((idx) => idx < features.length),
+      };
+    }),
+
+  reorderLayers: (fromIndex, toIndex) =>
+    set((state) => {
+      if (
+        fromIndex < 0 ||
+        fromIndex >= state.mapFeatures.length ||
+        toIndex < 0 ||
+        toIndex >= state.mapFeatures.length ||
+        fromIndex === toIndex
+      ) {
+        return state;
+      }
+
+      const updatedFeatures = [...state.mapFeatures];
+      const [draggedItem] = updatedFeatures.splice(fromIndex, 1);
+      updatedFeatures.splice(toIndex, 0, draggedItem);
+
+      const remap = (idx: number) => {
+        if (idx === fromIndex) return toIndex;
+        if (fromIndex < toIndex && idx > fromIndex && idx <= toIndex) return idx - 1;
+        if (fromIndex > toIndex && idx >= toIndex && idx < fromIndex) return idx + 1;
+        return idx;
+      };
+
+      const newStyles: Record<number, LayerStyle> = {};
+      const newTypes: Record<number, VisualizationLayerType> = {};
+      const newConfigs: Record<number, any> = {};
+
+      // Migrate existing records by index
+      Object.entries(state.mapFeatureLayerStyles).forEach(([idxStr, style]) => {
+        newStyles[remap(Number(idxStr))] = style;
+      });
+      Object.entries(state.mapFeatureLayerTypes).forEach(([idxStr, type]) => {
+        newTypes[remap(Number(idxStr))] = type;
+      });
+      Object.entries(state.mapFeatureLayerConfigs).forEach(([idxStr, config]) => {
+        newConfigs[remap(Number(idxStr))] = config;
+      });
+
+      // Synchronize with properties directly on the features (source of truth)
+      updatedFeatures.forEach((feat, idx) => {
+        if (feat) {
+          if (feat._layerStyle) {
+            newStyles[idx] = feat._layerStyle;
+          } else if (newStyles[idx]) {
+            feat._layerStyle = newStyles[idx];
+          }
+
+          if (feat._layerType) {
+            newTypes[idx] = feat._layerType;
+          } else if (newTypes[idx]) {
+            feat._layerType = newTypes[idx];
+          }
+
+          if (feat._layerConfig) {
+            newConfigs[idx] = feat._layerConfig;
+          } else if (newConfigs[idx]) {
+            feat._layerConfig = newConfigs[idx];
+          }
+        }
+      });
+
+      let newSelected = state.selectedLayerIndex;
+      if (newSelected !== null) {
+        newSelected = remap(newSelected);
+      }
+
+      let newActiveStyle = state.activeStylePanelLayerIndex;
+      if (newActiveStyle !== null) {
+        newActiveStyle = remap(newActiveStyle);
+      }
+
+      const newHidden = state.hiddenLayerIndexes.map(remap);
+
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerStyles: newStyles,
+        mapFeatureLayerTypes: newTypes,
+        mapFeatureLayerConfigs: newConfigs,
+        selectedLayerIndex: newSelected,
+        activeStylePanelLayerIndex: newActiveStyle,
+        hiddenLayerIndexes: newHidden,
+      };
+    }),
+
+  removeLayer: (index) =>
+    set((state) => {
+      if (index < 0 || index >= state.mapFeatures.length) return state;
+
+      const updatedFeatures = [...state.mapFeatures];
+      updatedFeatures.splice(index, 1);
+
+      const newStyles: Record<number, LayerStyle> = {};
+      const newTypes: Record<number, VisualizationLayerType> = {};
+      const newConfigs: Record<number, any> = {};
+
+      Object.entries(state.mapFeatureLayerStyles).forEach(([idxStr, style]) => {
+        const i = Number(idxStr);
+        if (i < index) newStyles[i] = style;
+        else if (i > index) newStyles[i - 1] = style;
+      });
+
+      Object.entries(state.mapFeatureLayerTypes).forEach(([idxStr, type]) => {
+        const i = Number(idxStr);
+        if (i < index) newTypes[i] = type;
+        else if (i > index) newTypes[i - 1] = type;
+      });
+
+      Object.entries(state.mapFeatureLayerConfigs).forEach(([idxStr, config]) => {
+        const i = Number(idxStr);
+        if (i < index) newConfigs[i] = config;
+        else if (i > index) newConfigs[i - 1] = config;
+      });
+
+      let newSelected = state.selectedLayerIndex;
+      if (newSelected === index) newSelected = null;
+      else if (newSelected !== null && newSelected > index) newSelected = newSelected - 1;
+
+      let newActiveStyle = state.activeStylePanelLayerIndex;
+      if (newActiveStyle === index) newActiveStyle = null;
+      else if (newActiveStyle !== null && newActiveStyle > index) newActiveStyle = newActiveStyle - 1;
+
+      const newHidden = state.hiddenLayerIndexes
+        .filter((i) => i !== index)
+        .map((i) => (i > index ? i - 1 : i));
+
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerStyles: newStyles,
+        mapFeatureLayerTypes: newTypes,
+        mapFeatureLayerConfigs: newConfigs,
+        selectedLayerIndex: newSelected,
+        activeStylePanelLayerIndex: newActiveStyle,
+        hiddenLayerIndexes: newHidden,
+      };
+    }),
   setBaseMap: (baseMap) => set({ baseMap }),
   setMapViewState: (mapViewState) => set({ mapViewState }),
   setViewState: (state) =>
@@ -248,48 +435,122 @@ export const useMapStore = create<MapState>((set) => ({
   clearVisualizationLayers: () => set({ visualizationLayers: [] }),
 
   // ─── Map Feature Layer Type Override Actions ──────────────────
-  setMapFeatureLayerType: (layerIndex, layerType) => set((state) => ({
-    mapFeatureLayerTypes: { ...state.mapFeatureLayerTypes, [layerIndex]: layerType },
-  })),
-  clearMapFeatureLayerType: (layerIndex) => set((state) => {
-    const updatedTypes = { ...state.mapFeatureLayerTypes };
-    const updatedConfigs = { ...state.mapFeatureLayerConfigs };
-    delete updatedTypes[layerIndex];
-    delete updatedConfigs[layerIndex]; // Clear config when resetting type
-    return { 
-      mapFeatureLayerTypes: updatedTypes,
-      mapFeatureLayerConfigs: updatedConfigs 
-    };
-  }),
-  setMapFeatureLayerConfig: (layerIndex, config) => set((state) => ({
-    mapFeatureLayerConfigs: {
-      ...state.mapFeatureLayerConfigs,
-      [layerIndex]: {
-        ...(state.mapFeatureLayerConfigs[layerIndex] || {}),
-        ...config
+  setMapFeatureLayerType: (layerIndex, layerType) =>
+    set((state) => {
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        updatedFeatures[layerIndex] = {
+          ...updatedFeatures[layerIndex],
+          _layerType: layerType,
+        };
       }
-    }
-  })),
-  resetMapFeatureLayerConfig: (layerIndex) => set((state) => {
-    const updatedConfigs = { ...state.mapFeatureLayerConfigs };
-    delete updatedConfigs[layerIndex];
-    return { mapFeatureLayerConfigs: updatedConfigs };
-  }),
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerTypes: { ...state.mapFeatureLayerTypes, [layerIndex]: layerType },
+      };
+    }),
+  clearMapFeatureLayerType: (layerIndex) =>
+    set((state) => {
+      const updatedTypes = { ...state.mapFeatureLayerTypes };
+      const updatedConfigs = { ...state.mapFeatureLayerConfigs };
+      delete updatedTypes[layerIndex];
+      delete updatedConfigs[layerIndex];
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        const copy = { ...updatedFeatures[layerIndex] };
+        delete copy._layerType;
+        delete copy._layerConfig;
+        updatedFeatures[layerIndex] = copy;
+      }
+      return { 
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerTypes: updatedTypes,
+        mapFeatureLayerConfigs: updatedConfigs 
+      };
+    }),
+  setMapFeatureLayerConfig: (layerIndex, config) =>
+    set((state) => {
+      const mergedConfig = {
+        ...(state.mapFeatureLayerConfigs[layerIndex] || {}),
+        ...config,
+      };
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        updatedFeatures[layerIndex] = {
+          ...updatedFeatures[layerIndex],
+          _layerConfig: mergedConfig,
+        };
+      }
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerConfigs: {
+          ...state.mapFeatureLayerConfigs,
+          [layerIndex]: mergedConfig,
+        },
+      };
+    }),
+  resetMapFeatureLayerConfig: (layerIndex) =>
+    set((state) => {
+      const updatedConfigs = { ...state.mapFeatureLayerConfigs };
+      delete updatedConfigs[layerIndex];
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        const copy = { ...updatedFeatures[layerIndex] };
+        delete copy._layerConfig;
+        updatedFeatures[layerIndex] = copy;
+      }
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerConfigs: updatedConfigs,
+      };
+    }),
 
   // ─── Layer Style Actions ─────────────────────────────────────
-  setMapFeatureLayerStyle: (layerIndex, style) => set((state) => ({
-    mapFeatureLayerStyles: { ...state.mapFeatureLayerStyles, [layerIndex]: style },
-  })),
-  clearMapFeatureLayerStyle: (layerIndex) => set((state) => {
-    const updated = { ...state.mapFeatureLayerStyles };
-    delete updated[layerIndex];
-    return {
-      mapFeatureLayerStyles: updated,
-      activeStylePanelLayerIndex:
-        state.activeStylePanelLayerIndex === layerIndex ? null : state.activeStylePanelLayerIndex,
-    };
-  }),
-  clearAllLayerStyles: () => set({ mapFeatureLayerStyles: {}, activeStylePanelLayerIndex: null }),
+  setMapFeatureLayerStyle: (layerIndex, style) =>
+    set((state) => {
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        updatedFeatures[layerIndex] = {
+          ...updatedFeatures[layerIndex],
+          _layerStyle: style,
+        };
+      }
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerStyles: { ...state.mapFeatureLayerStyles, [layerIndex]: style },
+      };
+    }),
+  clearMapFeatureLayerStyle: (layerIndex) =>
+    set((state) => {
+      const updated = { ...state.mapFeatureLayerStyles };
+      delete updated[layerIndex];
+      const updatedFeatures = [...state.mapFeatures];
+      if (updatedFeatures[layerIndex]) {
+        const copy = { ...updatedFeatures[layerIndex] };
+        delete copy._layerStyle;
+        updatedFeatures[layerIndex] = copy;
+      }
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerStyles: updated,
+        activeStylePanelLayerIndex:
+          state.activeStylePanelLayerIndex === layerIndex ? null : state.activeStylePanelLayerIndex,
+      };
+    }),
+  clearAllLayerStyles: () =>
+    set((state) => {
+      const updatedFeatures = state.mapFeatures.map((feat) => {
+        if (!feat || !feat._layerStyle) return feat;
+        const copy = { ...feat };
+        delete copy._layerStyle;
+        return copy;
+      });
+      return {
+        mapFeatures: updatedFeatures,
+        mapFeatureLayerStyles: {},
+        activeStylePanelLayerIndex: null,
+      };
+    }),
   setActiveStylePanelLayerIndex: (index) => set({ activeStylePanelLayerIndex: index }),
 
   // ─── Layer Visibility Actions ────────────────────────────────

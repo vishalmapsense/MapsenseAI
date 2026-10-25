@@ -123,6 +123,8 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   run_client_duckdb_query: "RUN_CLIENT_DUCKDB_QUERY",
   map_style_layer: "STYLE_LAYER",
   map_clear_layer_style: "CLEAR_LAYER_STYLE",
+  compare_pincodes_locus_score: "COMPARE_PINCODES",
+  score_pincode_locus: "SCORE_PINCODE",
 };
 
 // ─── POST Handler (Streaming) ────────────────────────────────────────────────
@@ -336,10 +338,69 @@ export async function POST(req: NextRequest) {
 
               const commandType = CLIENT_TOOL_COMMAND_MAP[call.name];
               if (commandType) {
-                clientToolCommands.push({ type: commandType, payload: call.args || {} });
-                console.log(`[Client Tool] ${call.name} → ${commandType}`, call.args);
+                let payload = call.args || {};
+                if (call.name === "run_client_duckdb_query") {
+                  const args = (call.args || {}) as Record<string, any>;
+                  payload = {
+                    ...args,
+                    queryText: args.queryText || args.query || args.sql || args.sqlQuery || args.query_text || "",
+                  };
+                }
+                clientToolCommands.push({ type: commandType, payload });
+                console.log(`[Client Tool] ${call.name} → ${commandType}`, payload);
               }
               
+              if (call.name === "compare_pincodes_locus_score") {
+                try {
+                  const { fetchOrResolvePinCode, comparePinCodes, SECTOR_PROFILES, AMENITY_CATEGORIES } = await import("@/services/locusScoreService");
+                  const args = (call.args || {}) as any;
+                  const d0 = typeof args.d0 === "number" ? args.d0 : 0.5;
+                  const sector = args.sector || "real_estate";
+                  const pinA = await fetchOrResolvePinCode(args.pinCodeA, d0);
+                  const pinB = await fetchOrResolvePinCode(args.pinCodeB, d0);
+                  const comparison = comparePinCodes(pinA, pinB, sector, d0);
+                  const categorySummary = Object.entries(comparison.categoryDeltas).map(([catId, catData]: [string, any]) => {
+                    const catConfig = (AMENITY_CATEGORIES as any)[catId];
+                    const profile = (SECTOR_PROFILES as any)[sector];
+                    const weightPct = (((profile?.weights as any)?.[catId] || 0) * 100).toFixed(0);
+                    return {
+                      category: catConfig?.label || catId,
+                      whyItMatters: catConfig?.whyItMatters || "",
+                      weight: `${weightPct}%`,
+                      scoreA: catData.scoreA,
+                      scoreB: catData.scoreB,
+                      diff: catData.diff > 0 ? `+${catData.diff} (${args.pinCodeA})` : catData.diff < 0 ? `+${Math.abs(catData.diff)} (${args.pinCodeB})` : "Equal",
+                      winner: catData.winner === "A" ? args.pinCodeA : catData.winner === "B" ? args.pinCodeB : "Tie"
+                    };
+                  });
+                  functionResponses.push({
+                    functionResponse: {
+                      name: call.name,
+                      response: {
+                        status: "success",
+                        pinCodeA: args.pinCodeA,
+                        nameA: pinA.name,
+                        cityA: pinA.city,
+                        overallScoreA: comparison.overallDelta.scoreA,
+                        pinCodeB: args.pinCodeB,
+                        nameB: pinB.name,
+                        cityB: pinB.city,
+                        overallScoreB: comparison.overallDelta.scoreB,
+                        winner: comparison.overallDelta.winner === "A" ? args.pinCodeA : comparison.overallDelta.winner === "B" ? args.pinCodeB : "Tie",
+                        sector: comparison.sector,
+                        sectorLabel: (SECTOR_PROFILES as any)[sector]?.name || sector,
+                        takeaways: comparison.narrativeTakeaways,
+                        categoryBreakdown: categorySummary,
+                        message: `Compared PIN ${args.pinCodeA} and ${args.pinCodeB} successfully. Present full Markdown comparison table, scores, and decay formula.`
+                      }
+                    }
+                  });
+                  continue;
+                } catch (e: any) {
+                  console.error("Failed to compute comparison in chat route:", e);
+                }
+              }
+
               // Return a synthetic "success" response to the LLM
               functionResponses.push({
                 functionResponse: {

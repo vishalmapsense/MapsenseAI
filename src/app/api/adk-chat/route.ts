@@ -135,6 +135,8 @@ const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
   run_client_duckdb_query: "RUN_CLIENT_DUCKDB_QUERY",
   map_style_layer: "STYLE_LAYER",
   map_clear_layer_style: "CLEAR_LAYER_STYLE",
+  compare_pincodes_locus_score: "COMPARE_PINCODES",
+  score_pincode_locus: "SCORE_PINCODE",
 };
 
 export async function POST(req: NextRequest) {
@@ -494,6 +496,16 @@ export async function POST(req: NextRequest) {
                         ...args,
                       },
                     });
+                  } else if (call.name === "run_client_duckdb_query") {
+                    const args = (call.args || {}) as Record<string, any>;
+                    const queryText = args.queryText || args.query || args.sql || args.sqlQuery || args.query_text || "";
+                    clientToolCommands.push({
+                      type: "RUN_CLIENT_DUCKDB_QUERY",
+                      payload: {
+                        ...args,
+                        queryText,
+                      },
+                    });
                   } else {
                     clientToolCommands.push({
                       type: commandType,
@@ -524,7 +536,13 @@ export async function POST(req: NextRequest) {
                   );
                 } else if (res.response) {
                   // Fallback: Legacy extraction for tools without afterToolCallback
-                  // (e.g., if a new tool is added but not intercepted)
+                  // Safety: Never run fallback raw extraction on run_osm_query or get_zip_data
+                  if (res.name === "run_osm_query" || res.name === "get_zip_data") {
+                    console.log(
+                      `🛡️ [ADK Route] Skipping fallback extraction for ${res.name} to prevent unclipped external points.`,
+                    );
+                    continue;
+                  }
                   console.log(
                     `📦 [ADK Route] functionResponse for tool: ${res.name} (no interception — fallback extraction)`,
                   );
@@ -627,13 +645,18 @@ export async function POST(req: NextRequest) {
               console.log(
                 `💬 [ADK Route] Model text from '${agentName}': ${chunkText.substring(0, 100)}...`,
               );
-              const prefix =
-                finalResponseText.length > 0 &&
-                !finalResponseText.endsWith("\n")
-                  ? "\n\n"
-                  : "";
-              finalResponseText += prefix + chunkText;
-              sendEvent({ type: "stream", message: prefix + chunkText });
+              // Internal agent coordination messages (like INCOMPLETE:) should not be shown to user
+              if (chunkText.trim().startsWith("INCOMPLETE:")) {
+                console.log(`⚠️ [ADK Route] Intercepted internal coordination signal from '${agentName}': ${chunkText}`);
+              } else {
+                const prefix =
+                  finalResponseText.length > 0 &&
+                  !finalResponseText.endsWith("\n")
+                    ? "\n\n"
+                    : "";
+                finalResponseText += prefix + chunkText;
+                sendEvent({ type: "stream", message: prefix + chunkText });
+              }
             }
           }
 
@@ -750,7 +773,43 @@ export async function POST(req: NextRequest) {
             `\n🚀 [ADK Route] Processing ${spatialDataBuffer.length} intercepted spatial data items from buffer...`,
           );
 
+          // If COMPARE_PINCODES or SCORE_PINCODE command is already queued, attach precomputed layers to it
+          // and avoid emitting redundant ADD_GEOJSON commands which cause 8 layers (double layers) on the map!
+          const compareCmd = clientToolCommands.find((c) => c.type === "COMPARE_PINCODES");
+          if (compareCmd) {
+            const compareItems = spatialDataBuffer.filter((i) => i.toolName === "compare_pincodes_locus_score" && i.geojson);
+            if (compareItems.length > 0) {
+              compareCmd.payload = {
+                ...compareCmd.payload,
+                precomputedLayers: compareItems.map((i) => i.geojson),
+              };
+              console.log(`  🎯 [ADK Route] Attached ${compareItems.length} precomputed layers to COMPARE_PINCODES command.`);
+            }
+          }
+
+          const scoreCmd = clientToolCommands.find((c) => c.type === "SCORE_PINCODE");
+          if (scoreCmd) {
+            const scoreItems = spatialDataBuffer.filter((i) => i.toolName === "score_pincode_locus" && i.geojson);
+            if (scoreItems.length > 0) {
+              scoreCmd.payload = {
+                ...scoreCmd.payload,
+                precomputedLayers: scoreItems.map((i) => i.geojson),
+              };
+              console.log(`  🎯 [ADK Route] Attached ${scoreItems.length} precomputed layers to SCORE_PINCODE command.`);
+            }
+          }
+
           for (const item of spatialDataBuffer) {
+            // Deduplication: Skip emitting ADD_GEOJSON for tools that have dedicated command handling
+            if (item.toolName === "compare_pincodes_locus_score" && compareCmd) {
+              console.log(`  ⏭️ [ADK Route] Skipping duplicate ADD_GEOJSON for ${item.label} (handled by COMPARE_PINCODES).`);
+              continue;
+            }
+            if (item.toolName === "score_pincode_locus" && scoreCmd) {
+              console.log(`  ⏭️ [ADK Route] Skipping duplicate ADD_GEOJSON for ${item.label} (handled by SCORE_PINCODE).`);
+              continue;
+            }
+
             // Handle unresolved mapbox:// URIs (need route-level MCP resolver)
             if (
               !item.geojson &&
@@ -777,14 +836,29 @@ export async function POST(req: NextRequest) {
                 console.error(`  ❌ Failed to resolve mapbox URI: ${uri}`, e);
               }
             } else if (item.geojson?.features?.length > 0) {
-              // Already normalized GeoJSON — add directly
-              // Check for duplicates (avoid adding if route-level fallback already added it)
-              const isDuplicate = clientToolCommands.some(
+              // Already normalized GeoJSON — add or merge directly
+              const existingCmd = clientToolCommands.find(
                 (cmd) =>
                   cmd.type === "ADD_GEOJSON" &&
                   cmd.payload?.label === item.label,
               );
-              if (!isDuplicate) {
+              if (existingCmd && existingCmd.payload?.geojson?.features) {
+                const existingFeatures = existingCmd.payload.geojson.features;
+                const seen = new Set(
+                  existingFeatures.map(
+                    (f: any) =>
+                      `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`,
+                  ),
+                );
+                const newToAdd = item.geojson.features.filter((f: any) => {
+                  const key = `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`;
+                  return !seen.has(key);
+                });
+                existingCmd.payload.geojson.features.push(...newToAdd);
+                console.log(
+                  `  ✅ Merged ${newToAdd.length} features into existing command "${item.label}" (Total: ${existingCmd.payload.geojson.features.length})`,
+                );
+              } else {
                 clientToolCommands.push({
                   type: "ADD_GEOJSON",
                   payload: { geojson: item.geojson, label: item.label },
@@ -861,45 +935,68 @@ export async function POST(req: NextRequest) {
 
           for (const filePath of fileLines) {
             const lower = filePath.toLowerCase();
-            const isSpatialExt =
+            const isJsonSpatial =
               lower.endsWith(".geojson") ||
               lower.endsWith(".json") ||
               lower.endsWith(".kml") ||
               lower.endsWith(".topojson");
+            const isTabularSpatial =
+              lower.endsWith(".parquet") ||
+              lower.endsWith(".csv");
 
-            if (!isSpatialExt) continue;
+            if (!isJsonSpatial && !isTabularSpatial) continue;
 
             const baseName = filePath.split("/").pop()?.replace(/\.[^/.]+$/, "") || "Attached Layer";
 
             // Check if this file was already added to clientToolCommands
             const alreadyAdded = clientToolCommands.some(
               (c) =>
-                c.type === "ADD_GEOJSON" &&
-                (c.payload?.label === baseName ||
-                  c.payload?.label === filePath ||
-                  c.payload?.geojson?._sourcePath === filePath),
+                (c.type === "ADD_GEOJSON" &&
+                  (c.payload?.label === baseName ||
+                    c.payload?.label === filePath ||
+                    c.payload?.geojson?._sourcePath === filePath)) ||
+                (c.type === "LOAD_URL" &&
+                  (c.payload?.url === filePath || c.payload?.label === baseName)),
             );
 
             if (!alreadyAdded) {
-              try {
-                console.log(`🚀 [ADK Route] Auto-loading attached spatial file: ${filePath}`);
+              if (isTabularSpatial) {
+                console.log(`🚀 [ADK Route] Auto-loading attached tabular/parquet file via LOAD_URL: ${filePath}`);
                 sendEvent({
                   type: "status",
-                  message: `Loading ${baseName} on map...`,
+                  message: `Loading ${baseName} (${lower.endsWith(".parquet") ? "Parquet" : "CSV"}) on map...`,
                 });
-                const norm = await fetchAndNormalizeSpatialUrl(filePath, baseName, { resolveMcpResource });
-                if (norm && norm.features && norm.features.length > 0) {
-                  clientToolCommands.push({
-                    type: "ADD_GEOJSON",
-                    payload: {
-                      geojson: norm,
-                      label: baseName,
-                    },
-                  });
-                  console.log(`  ✅ Added ${norm.features.length} features from attached file '${baseName}'`);
+                clientToolCommands.push({
+                  type: "LOAD_URL",
+                  payload: {
+                    url: filePath,
+                    label: baseName,
+                  },
+                });
+                if (!clientToolCommands.some((c) => c.type === "FIT_BOUNDS" || c.type === "FLY_TO")) {
+                  clientToolCommands.push({ type: "FIT_BOUNDS", payload: {} });
                 }
-              } catch (e: any) {
-                console.error(`Failed to auto-load attached file '${filePath}':`, e);
+              } else {
+                try {
+                  console.log(`🚀 [ADK Route] Auto-loading attached spatial file: ${filePath}`);
+                  sendEvent({
+                    type: "status",
+                    message: `Loading ${baseName} on map...`,
+                  });
+                  const norm = await fetchAndNormalizeSpatialUrl(filePath, baseName, { resolveMcpResource });
+                  if (norm && norm.features && norm.features.length > 0) {
+                    clientToolCommands.push({
+                      type: "ADD_GEOJSON",
+                      payload: {
+                        geojson: norm,
+                        label: baseName,
+                      },
+                    });
+                    console.log(`  ✅ Added ${norm.features.length} features from attached file '${baseName}'`);
+                  }
+                } catch (e: any) {
+                  console.error(`Failed to auto-load attached file '${filePath}':`, e);
+                }
               }
             }
           }

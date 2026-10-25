@@ -1,7 +1,10 @@
 import React from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import rehypeHighlight from "rehype-highlight";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import "highlight.js/styles/github-dark.css";
 import type { Components } from "react-markdown";
 
@@ -166,13 +169,16 @@ interface MarkdownRendererProps {
 }
 
 export const MarkdownRenderer: React.FC<MarkdownRendererProps> = ({ content }) => {
-  const formattedContent = content.replace(/\[OPTION:\s*([^\]]+)\]/gi, "• **$1**");
+  const formattedContent = content
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_, math) => `$$${math}$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_, math) => `$${math}$`)
+    .replace(/\[OPTION:\s*([^\]]+)\]/gi, "• **$1**");
 
   return (
     <div className="markdown-body max-w-none break-words [overflow-wrap:anywhere] min-w-0 w-full">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeHighlight, rehypeKatex]}
         components={components}
       >
         {formattedContent}

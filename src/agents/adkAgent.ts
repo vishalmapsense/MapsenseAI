@@ -23,10 +23,14 @@ import {
   type TabularResultData,
 } from "./utils/tabularDataInterceptor";
 import { toolGuardrailCallback } from "./utils/toolGuardrail";
+import { getAmenityCategoryAndColor } from "./utils/amenityColors";
 
 // Shared language constraint for all agents
 const LANG_RULE =
-  "IMPORTANT: You MUST communicate with the user in their preferred language. Prefer using Hinglish, Hindi, or English. If the user communicates in a specific local language, respond in that local language.";
+  "LANGUAGE POLICY (CRITICAL):\n" +
+  "- Match the user's language: ALWAYS respond in the EXACT same language that the user used to ask their question (e.g., if the user asks in Hindi, answer in Hindi; if in Hinglish, answer in Hinglish; if in any other language, answer in that language).\n" +
+  "- Default Preference: English is the primary and preferred default language. If the user asks in English, or if their language preference is neutral, mixed, or ambiguous, ALWAYS respond in clear, professional English.\n" +
+  "- Consistency: Maintain the chosen language consistently throughout the entire response without unnecessary language switching.";
 const HITL_RULE =
   "HUMAN IN THE LOOP (HITL), AMBIGUITY & SUGGESTION HANDLING:\n" +
   "- If the user prompt is ambiguous (e.g., multiple locations with the same name, missing region, unclear destination) OR if critical parameter data is missing, DO NOT guess.\n" +
@@ -113,6 +117,9 @@ const PLAYGROUND_AGENT_SKILL =
   "   - No params = all layers. id = single layer. originalLayerId = all versions.\n" +
   "\n" +
   "4. get_osm_query — List all available OSM queries, or fetch one by queryId.\n" +
+  "   Available queries:\n" +
+  "   - 'Polygon Search' (queryId: '610acbb8-9d09-463b-bfcd-74b03e89082f'): Fetches amenities strictly INSIDE a polygon boundary using parameter 'poly' (format: 'lat1 lon1 lat2 lon2 ...'). PREFERRED for any region or zipcode search!\n" +
+  "   - 'Nearby Search' (queryId: 'aa7cd1cc-8936-4d6c-b8a5-0fd59436395e'): Fetches amenities in a radius around a point using parameters { radius, latitude, longitude }.\n" +
   "\n" +
   "5. run_osm_query — Execute a canned OSM query with queryId, parameters, amenities.\n" +
   "\n" +
@@ -127,7 +134,14 @@ const PLAYGROUND_AGENT_SKILL =
   "DATA SIZE RULE: The server automatically extracts spatial data from tool responses and sends it to the map. " +
   "You will see a lightweight summary. Do NOT try to re-fetch or re-render the data.\n" +
   "\n" +
-  "BOUNDARY/REGION SEARCH RULE (CRITICAL for OSM amenity queries):\n" +
+  "BOUNDARY/REGION SEARCH & ZIPCODE SCORING RULE (CRITICAL):\n" +
+  "  When calculating the Location Score (LocusScore) or evaluating amenities for any PIN / ZIP code or boundary:\n" +
+  "  Follow this exact 4-step workflow:\n" +
+  "  Step 1: Boundary & Centroid — Call get_zip_data(key='zipcode', value='<zipcode>') (or get_district_data) to fetch the polygon boundary coordinates, office name, and centroid.\n" +
+  "  Step 2: OSM Query Template — For boundary queries, use Polygon Search queryId '610acbb8-9d09-463b-bfcd-74b03e89082f' with parameter { poly: '<lat1 lon1 lat2 lon2 ...>' } to fetch amenities natively inside the polygon boundary. Alternatively, the system automatically translates radial queries to polygon boundary queries.\n" +
+  "  Step 3: Fetch Amenities — Call run_osm_query with queryId '610acbb8-9d09-463b-bfcd-74b03e89082f' and parameters: { poly: '<lat1 lon1 lat2 lon2 ...>' } (or Nearby Search queryId 'aa7cd1cc-8936-4d6c-b8a5-0fd59436395e' where the system guardrail will automatically inject the poly parameter from the boundary). NOTE: Amenities MUST be in key=value format like 'amenity=hospital' (never just 'hospital'). STRICT BOUNDARY RULE: Only POIs strictly inside the boundary polygon are returned.\n" +
+  "  Step 4: Score Calculation — Calculate the LocusScore using the distance-decay formula: AmenityValue = Σ [ 1 / (1 + distance / 0.5) ] across the 8 categories and sector profiles (Real Estate, FMCG/Retail, Quick-Commerce) and display the boundary and inside POIs on the map.\n" +
+  "\n" +
   "  When the user asks to search for amenities or features (schools, hospitals, ATMs, parks, etc.) but does NOT specify a region, boundary, or area:\n" +
   "  → You MUST ask the user: 'Kis region ya boundary ke ander search karna chahte hain? Please mention the region name (e.g., Delhi, Lucknow) or use the + icon in chat to Select Layer for an existing boundary on the map.'\n" +
   "  → Do NOT proceed with any tool call until the user provides a region/boundary.\n" +
@@ -150,6 +164,7 @@ const DUCKDB_AGENT_SKILL =
   "  5. PRE-COMPUTED COLUMNS AVAILABLE ON EVERY LAYER (POLYGONS, LINES, POINTS):\n" +
   "     - Centroid & Coordinates: 'center_lat', 'center_lng', 'lat', 'lng', 'centroid' (WKT 'POINT(lng lat)')\n" +
   "     - Area & Measurements: 'area_sq_km', 'area_sq_meters', 'perimeter_km'\n" +
+  "     - Geometry Column: 'geometry' is ALREADY stored as a GeoJSON string (VARCHAR). NEVER call ST_AsGeoJSON(geometry) — simply use `geometry` or `SELECT *`!\n" +
   "     - In master table 'map_features': column '__layer_name' matches the sanitized table name (e.g. 'nyc_census_population_data')\n" +
   "  6. FOR CENTROID QUERIES (e.g. 'centroid find karo', 'center of features', 'find centroids'):\n" +
   "     Execute:\n" +
@@ -161,13 +176,23 @@ const DUCKDB_AGENT_SKILL =
   '       SELECT <attr_col>, area_sq_km, area_sq_meters FROM "<tableName>";\n' +
   "  8. The query results will appear directly in the user's Query Results Panel. Provide a concise 1-2 sentence summary of the result in your answer.\n\n" +
   "CRITICAL LAYER STYLING RULE (NEVER RUN SQL FOR COLORING):\n" +
-  "- When the user asks to COLOR, STYLE, HIGHLIGHT, or CATEGORIZE a layer or its features (e.g. 'color karo', 'region ke basis par color', 'color code by speed', 'sab features ko red kardo'):\n" +
+  "- When the user asks to COLOR, STYLE, HIGHLIGHT, EXTRUDE (3D), or CATEGORIZE a layer or its features (e.g. 'color karo', 'region ke basis par color', '3D me dikhao', 'color code by speed', 'sab features ko red kardo', 'gold outline do'):\n" +
   "  1. ❌ DO NOT run a SQL SELECT query (e.g., SELECT ... FROM ... LIMIT 50 or GROUP BY) that dumps filtered rows into the Query Results table! The user wants to view ALL the data on the map styled with colors, not a filtered subset in a table.\n" +
   "  2. ✅ Call 'map_style_layer' directly!\n" +
-  "     * Discrete category example: map_style_layer(layerIndex=0, style={ type: 'category', field: 'region' })\n" +
+  "     * Discrete category: map_style_layer(layerIndex=0, style={ type: 'category', field: 'region' })\n" +
+  "     * 3D Extrusion by metric: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'population', extruded: true, elevationField: 'population', elevationScale: 0.5, minColor: '#3b82f6', maxColor: '#ef4444' })\n" +
+  "     * Outline / boundary highlight: map_style_layer(layerIndex=0, style={ type: 'solid', filled: false, stroked: true, lineColor: 'gold', lineWidth: 3 })\n" +
   "     * Continuous numeric into Best/Average/Poor: map_style_layer(layerIndex=0, style={ type: 'category', field: 'network_category', sourceField: 'avg_d_kbps', ranges: [...] })\n" +
-  "     * Gradient example: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'avg_d_kbps', min: 0, max: 50000 })\n" +
+  "     * Gradient example: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'avg_d_kbps', minColor: '#ef4444', maxColor: '#22c55e' })\n" +
   "  3. Calling 'map_style_layer' styles ALL features across the layer instantly on the map.\n\n" +
+  "TABLE / DATASET EXPLORATION INTENT (CRITICAL):\n" +
+  "- When the user explicitly asks for a TABLE, table representation, or says 'table me karoo', 'table dikhao', 'show table', 'paired with a table':\n" +
+  "  1. You MUST call 'run_client_duckdb_query' with a valid, complete SQL query in 'queryText'!\n" +
+  '     Example for tracts/population: SELECT * EXCLUDE (geometry), geometry AS geometry FROM "<tableName>" ORDER BY "Population" DESC LIMIT 20;\n' +
+  '     Example for least populated: SELECT * EXCLUDE (geometry), geometry AS geometry FROM "<tableName>" ORDER BY "Population" ASC LIMIT 20;\n' +
+  "  2. NEVER call run_client_duckdb_query with an empty or missing queryText.\n" +
+  "  3. If user ALSO asked to highlight/style the map layer (e.g. 'highlight the 10-20 tracts paired with a table'):\n" +
+  "     Call run_client_duckdb_query (with applyToMap: true if user wants filtered layer) AND/OR map_style_layer.\n\n" +
   "YOUR AVAILABLE TOOLS:\n" +
   "\n" +
   "1. run_client_duckdb_query — Execute fast DuckDB SQL directly in the browser (client DuckDB-Wasm).\n" +
@@ -218,16 +243,17 @@ const DUCKDB_AGENT_SKILL =
   "   - Existing table: SELECT * FROM rides;\n" +
   "\n" +
   "GEOMETRY OUTPUT FORMAT (CRITICAL — ALWAYS FOLLOW!):\n" +
-  "   - ❌ NEVER return raw/binary geometry columns (WKB/WKT). They CANNOT be displayed on the map.\n" +
-  "   - ✅ ALWAYS convert geometry to GeoJSON using ST_AsGeoJSON().\n" +
-  "   - ❌ WRONG: SELECT * FROM my_data; (returns raw binary geom)\n" +
+  "   - ❌ NEVER return raw/binary geometry columns (WKB/WKT) from st_read(). They CANNOT be displayed on the map.\n" +
+  "   - ✅ For raw binary geometry (e.g. st_read('URL')): ALWAYS convert geometry to GeoJSON using ST_AsGeoJSON(geom).\n" +
+  "   - ❌ WRONG for st_read: SELECT * FROM st_read('URL'); (returns raw binary geom)\n" +
   "   - ❌ WRONG: SELECT *, ST_AsGeoJSON(geom) AS geom FROM my_data; (duplicates the column, breaks the map)\n" +
-  "   - ✅ CORRECT: SELECT * EXCLUDE (geom), ST_AsGeoJSON(geom) AS geom FROM my_data;\n" +
-  "   - Top-N boundary example:\n" +
-  "     INSTALL spatial; LOAD spatial;\n" +
-  "     SELECT * EXCLUDE (geom), ST_AsGeoJSON(geom) AS geom FROM st_read('URL') ORDER BY \"Population\" DESC LIMIT 50;\n" +
-  "   - This rule applies to EVERY query that reads from a table/file containing a geometry column (geom, geometry, wkb_geometry, the_geom, shape).\n" +
-  "   - Returning ST_AsGeoJSON(geom) AS geom causes the boundaries to automatically render on the map for the user!\n" +
+  "   - ✅ CORRECT for st_read: SELECT * EXCLUDE (geom), ST_AsGeoJSON(geom) AS geom FROM st_read('URL');\n" +
+  "   - ⚠️ CRITICAL FOR CLIENT MAP LAYERS (run_client_duckdb_query):\n" +
+  "     * The 'geometry' column in client DuckDB tables is ALREADY a GeoJSON string (VARCHAR)!\n" +
+  "     * ❌ NEVER call ST_AsGeoJSON(geometry) or ST_AsGeoJSON(geom) on client map layers — it causes DuckDB Binder Error 'No function matches ST_AsGeoJSON(VARCHAR)'.\n" +
+  "     * ✅ Simply select the column directly: SELECT * FROM \"tableName\" or SELECT * EXCLUDE (geometry), geometry AS geometry FROM ...\n" +
+  "     * To highlight/filter features on the map, call run_client_duckdb_query with applyToMap: true.\n" +
+  "   - Returning GeoJSON causes the boundaries to automatically render on the map for the user!\n" +
   "\n" +
   "SQL BEST PRACTICES:\n" +
   "   - For exploration queries, always use LIMIT (e.g., LIMIT 100) to avoid huge results.\n" +
@@ -262,14 +288,36 @@ const MAP_UI_AGENT_SKILL =
   "C) Layers & Style: map_clear_layers, map_toggle_layer, map_set_base(osm|carto-light|carto-dark|satellite), map_load_url.\n" +
   "D) Geometry Ops: map_simplify_geometry, map_buffer_geometry(distance_km), map_split_polygon, map_merge_polygons.\n" +
   "E) Layer Selection: map_select_layer — Activates layer selection mode. Use when the user wants to search/query WITHIN a specific boundary but hasn't provided one. The user can click on map features or layers panel items to select boundaries.\n" +
-  "F) Layer Styling: map_style_layer, map_clear_layer_style — Apply or remove data-driven visual styling to map layers.\n" +
-  "   Supports 3 style types:\n" +
+  "F) Layer Styling: map_style_layer, map_clear_layer_style — Apply or remove visual styling to map layers.\n" +
+  "   CRITICAL DETERMINISTIC CONTRACT (100% MATCH BETWEEN WHAT YOU DECIDE & WHAT APPEARS ON THE MAP):\n" +
+  "   1. YOU (THE AGENT) DECIDE THE EXACT COLORS & LAYER TYPE:\n" +
+  "      Never leave colors or layer types unspecified or random!\n" +
+  "      • When styling categories or value groups, ALWAYS provide explicit `mapping: { '<CategoryName>': { fillColor: '<exact_color>' } }`.\n" +
+  "      • When applying solid colors, ALWAYS provide explicit `fillColor: '<exact_color>'` (and optional `lineColor`).\n" +
+  "      • When applying gradients, ALWAYS provide explicit `minColor: '<exact_color>', maxColor: '<exact_color>'` (or `colorRange`).\n" +
+  "   2. COMPLETE LAYER TYPES YOU CAN FREELY CHOOSE (visualizationType):\n" +
+  "      • 'GeoJsonLayer' — Standard polygon/line/point vectors (2D choropleths or 3D extrusions with extruded: true, outlines with filled: false)\n" +
+  "      • 'HeatmapLayer' — Smooth Gaussian heat density surface for point datasets\n" +
+  "      • 'HexagonLayer' — 3D hexagonal bins with dynamic elevation based on counts/sums\n" +
+  "      • 'ScatterplotLayer' — High-performance circle points with custom radius\n" +
+  "      • 'GridLayer' — 3D square grid cell aggregation\n" +
+  "   3. COMPLETE DETERMINISTIC COLOR PALETTE (Use these exact hex codes or names):\n" +
+  "      • Red: '#ef4444' | Crimson: '#dc2626' | Ruby: '#e11d48' | Rose: '#f43f5e'\n" +
+  "      • Blue: '#3b82f6' | Royal: '#2563eb' | Navy: '#1e3a8a' | Sky: '#0ea5e9'\n" +
+  "      • Green: '#22c55e' | Emerald: '#10b981' | Forest: '#166534' | Lime: '#84cc16'\n" +
+  "      • Yellow: '#eab308' | Gold: '#f59e0b'\n" +
+  "      • Orange: '#f97316' | Amber: '#d97706'\n" +
+  "      • Purple: '#a855f7' | Violet: '#8b5cf6' | Indigo: '#6366f1'\n" +
+  "      • Cyan: '#06b6d4' | Teal: '#14b8a6' | Turquoise: '#2dd4bf'\n" +
+  "      • Pink: '#ec4899' | Magenta: '#d946ef'\n" +
+  "      • Neutral: Slate '#64748b' | Dark '#1e293b' | White '#ffffff'\n" +
+  "   4. 1:1 CHAT AGREEMENT MANDATE:\n" +
+  "      The exact color names and hex codes you pass in map_style_layer MUST BE THE EXACT ONES described to the user in chat.\n" +
+  "      NEVER say in chat 'I colored South blue' if you passed a different color in the tool call!\n" +
+  "   Supports rich styling modes:\n" +
   "   - 'category': Color features by discrete category OR numeric thresholds.\n" +
-  "     * SIMPLEST & MOST POWERFUL: You only need to provide 'field' and optionally 'palette'! The system automatically discovers all unique categories and assigns distinct, harmonious colors without single-color fallback!\n" +
-  "       Example: map_style_layer(layerIndex=0, style={ type: 'category', field: 'region', palette: 'rainbow' })\n" +
-  "       Palettes available: 'rainbow' (default multi-hue), 'traffic' (green/yellow/red), 'ocean' (blues/teals), 'heatmap' (yellow to red), 'viridis' (blue to yellow), 'sunset' (purple to orange), 'pastel'.\n" +
-  "     * Custom mapping example:\n" +
-  "       map_style_layer(layerIndex=0, style={ type: 'category', field: 'status', mapping: { 'Active': { fillColor: [34,197,94,180], label: 'Active' }, 'Inactive': { fillColor: [239,68,68,180], label: 'Inactive' } } })\n" +
+  "     * Custom mapping (RECOMMENDED FOR DETERMINISM):\n" +
+  "       map_style_layer(layerIndex=0, style={ type: 'category', field: 'region', mapping: { 'South': { fillColor: '#3b82f6', label: 'South' }, 'North': { fillColor: '#ef4444', label: 'North' } } })\n" +
   "     * Continuous numeric classified into classes (e.g. speed, score, rating into Best/Average/Poor):\n" +
   "       map_style_layer(layerIndex=0, style={\n" +
   "         type: 'category',\n" +
@@ -281,25 +329,50 @@ const MAP_UI_AGENT_SKILL =
   "           { max: 10000, category: 'Poor' }\n" +
   "         ],\n" +
   "         mapping: {\n" +
-  "           'Best': { fillColor: [34,197,94,180], label: 'Best (>= 25 Mbps)' },\n" +
-  "           'Average': { fillColor: [234,179,8,180], label: 'Average (10-25 Mbps)' },\n" +
-  "           'Poor': { fillColor: [239,68,68,180], label: 'Poor (< 10 Mbps)' }\n" +
+  "           'Best': { fillColor: '#22c55e', label: 'Best (>= 25 Mbps)' },\n" +
+  "           'Average': { fillColor: '#eab308', label: 'Average (10-25 Mbps)' },\n" +
+  "           'Poor': { fillColor: '#ef4444', label: 'Poor (< 10 Mbps)' }\n" +
   "         }\n" +
   "       })\n" +
-  "   - 'gradient': Color features by numeric range. If min/max are omitted, they are auto-calculated from the data!\n" +
-  "     Example: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'avg_d_kbps', minColor: [239,68,68,180], maxColor: [34,197,94,180] })\n" +
-  "   - 'solid': Apply a flat single color to the entire layer.\n" +
-  "     Example: map_style_layer(layerIndex=0, style={ type: 'solid', fillColor: [34,197,94,180] })\n" +
+  "   - 'gradient': Color features by numeric range with explicit minColor & maxColor.\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'avg_d_kbps', minColor: '#ef4444', maxColor: '#22c55e' })\n" +
+  "     Multi-stop gradient example:\n" +
+  "       map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'population', colorRange: ['#1e3a8a', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'] })\n" +
+  "   - 'solid': Apply a flat single color or outline.\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ type: 'solid', fillColor: '#3b82f6' })\n" +
+  "   - 3D EXTRUSION (Polygons with 3D height based on metrics):\n" +
+  "     Set extruded: true, elevationField, and elevationScale. The map perspective automatically tilts to 3D (pitch 45°)!\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'population', extruded: true, elevationField: 'population', elevationScale: 0.5, minColor: '#3b82f6', maxColor: '#ef4444' })\n" +
+  "   - BOUNDARY / OUTLINE-ONLY HIGHLIGHTING:\n" +
+  "     Set filled: false, stroked: true, lineWidth: 3, lineColor: 'gold' (or hex/RGBA).\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ type: 'solid', filled: false, stroked: true, lineColor: '#f59e0b', lineWidth: 3 })\n" +
+  "   - VISUALIZATION TYPES (Layer Switching):\n" +
+  "     Convert layer rendering to 'HeatmapLayer', 'HexagonLayer', 'ScatterplotLayer', or 'GridLayer'.\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ visualizationType: 'HeatmapLayer', radiusPixels: 40 })\n" +
+  "     Example: map_style_layer(layerIndex=0, style={ visualizationType: 'HexagonLayer', extruded: true, radius: 1000 })\n" +
   "   - Dynamic Point Sizing / Bubbles:\n" +
-  "     Add 'sizeField' (e.g. 'population') or 'pointRadius' (e.g. 8) to scale circle sizes on point layers.\n" +
-  "   COLOR REFERENCE (RGBA, use alpha 180 for fill, 255 for lines):\n" +
-  "     Green=[34,197,94], Yellow=[234,179,8], Red=[239,68,68], Blue=[59,130,246],\n" +
-  "     Orange=[249,115,22], Purple=[168,85,247], Teal=[20,184,166], Pink=[236,72,153],\n" +
-  "     Cyan=[6,182,212], Indigo=[99,102,241], Lime=[132,204,22], Amber=[245,158,11]\n" +
+  "     Add 'sizeField' (e.g. 'population') or 'pointRadius' (default: 25, range: 2 to 100) to scale circle sizes on point layers.\n" +
   "   Use map_clear_layer_style(layerIndex) to remove styling and revert to default.\n" +
+  "   G) LocusScore PIN Intelligence (Dual PIN & Zip Code Comparison):\n" +
+  "   - compare_pincodes_locus_score(pinCodeA, pinCodeB, sector, specificAmenities, d0, renderOnMap):\n" +
+  "     Compares any two Indian PIN codes or zip codes across 8 OSM amenity categories:\n" +
+  "     (1) Education (schools, colleges, universities — biggest home-buying driver),\n" +
+  "     (2) Healthcare (hospitals, clinics, pharmacies — emergency golden-hour access),\n" +
+  "     (3) Daily Needs & Retail (supermarkets, convenience kiranas, marketplaces — daily livability),\n" +
+  "     (4) Food & Beverage (restaurants, cafes, fast food — footfall & lifestyle proxy),\n" +
+  "     (5) Banking & Finance (banks, ATMs — trust and cash signal),\n" +
+  "     (6) Transit & Connectivity (bus stops, railway stations, metro — commute radius),\n" +
+  "     (7) Recreation & Open Space (parks, playgrounds, lakes — wellness & open space),\n" +
+  "     (8) Civic & Community (places of worship, police, post office — neighbourhood safety & identity).\n" +
+  "     Applies 5-step distance decay: AmenityValue = Σ [ 1 / (1 + distance_km / d0) ] (d0 ≈ 0.5 km) with 1 km buffer and city-wide min-max normalization (0-100).\n" +
+  "     Sector profiles: 'real_estate' (20% edu, 15% health, 15% daily, 5% f&b, 5% bank, 20% transit, 10% rec, 10% civic),\n" +
+  "     'fmcg_retail' (10% edu, 5% health, 25% daily, 15% f&b, 10% bank, 20% transit, 5% rec, 10% civic),\n" +
+  "     or 'quick_commerce' (5% edu, 10% health, 20% daily, 10% f&b, 5% bank, 25% transit, 0% rec, 25% civic).\n" +
+  "     Automatically renders POI markers with category colors and 1 km buffer zones on the map!\n" +
+  "   - score_pincode_locus(pinCode, sector, specificAmenities, d0, renderOnMap): Evaluates a single PIN code.\n" +
   "\n" +
   "STYLING WORKFLOW — FULLY FLEXIBLE FOR ANY USER INTENT (CRITICAL):\n" +
-  "   When a user asks to categorize, color-code, highlight, or classify features on a layer (e.g. 'south and north ke basis par color karo', 'color by status', 'filter karke color karo'):\n" +
+  "   When a user asks to categorize, color-code, highlight, extrude, or classify features on a layer (e.g. 'south and north ke basis par color karo', 'color by status', '3D me dikhao', 'filter karke color karo'):\n" +
   "   1. Direct Categorical Field: { type: 'category', field: '<fieldName>', palette: 'rainbow' } (auto-discovers unique values).\n" +
   "   2. VALUE GROUPS (for queries like 'South aur North ke basis par color karo'):\n" +
   "      Use 'valueGroups' to group features into concepts (e.g. South vs North, Metro vs Rural):\n" +
@@ -311,26 +384,29 @@ const MAP_UI_AGENT_SKILL =
   "          'North': ['Delhi', 'Punjab', 'Haryana', 'Uttar Pradesh', 'Himachal Pradesh', 'Jammu & Kashmir', 'Rajasthan', 'Uttarakhand', 'Ladakh']\n" +
   "        },\n" +
   "        mapping: {\n" +
-  "          'South': { fillColor: [59, 130, 246, 200] },\n" +
-  "          'North': { fillColor: [239, 68, 68, 200] }\n" +
+  "          'South': { fillColor: '#3b82f6' },\n" +
+  "          'North': { fillColor: '#ef4444' }\n" +
   "        }\n" +
   "      })\n" +
   "      The engine maps features matching these values and tags them with the category!\n" +
-  "   3. RULES: For conditions or comparisons (e.g. lat < 20, rating > 4):\n" +
-  "      map_style_layer(layerIndex=0, style={ type: 'category', rules: [ { category: 'South', condition: 'lat < 20' }, { category: 'North', condition: 'lat >= 20' } ] })\n" +
-  "   4. FILTER + COLOR: Set dimUnmatched: true (dims other features to faint gray) or hideUnmatched: true (hides others).\n" +
-  "   5. RANGES: For continuous numeric thresholds (Best/Average/Poor), use 'ranges'.\n" +
-  "   6. DUCKDB FILTERING: If the user asks to filter data via SQL, call run_client_duckdb_query with applyToMap: true to display filtered features on the map, then style with map_style_layer.\n" +
+  "   3. RULES: For conditions or comparisons (e.g. lat < 20, rating > 4, pop > 50000):\n" +
+  "      map_style_layer(layerIndex=0, style={ type: 'category', rules: [ { category: 'South', condition: 'lat < 20', fillColor: '#3b82f6' }, { category: 'North', condition: 'lat >= 20', fillColor: '#ef4444' } ] })\n" +
+  "   4. 3D EXTRUSION: For 3D building / block heights by metric:\n" +
+  "      map_style_layer(layerIndex=0, style={ type: 'gradient', field: 'population', extruded: true, elevationField: 'population', elevationScale: 0.5, minColor: '#3b82f6', maxColor: '#ef4444' })\n" +
+  "   5. OUTLINE ONLY / BOUNDARIES: Set filled: false, stroked: true, lineWidth: 3, lineColor: 'gold'.\n" +
+  "   6. FILTER + COLOR: Set dimUnmatched: true (dims other features to faint gray) or hideUnmatched: true (hides others).\n" +
+  "   7. RANGES: For continuous numeric thresholds (Best/Average/Poor), use 'ranges'.\n" +
+  "   8. DUCKDB FILTERING: If the user asks to filter data via SQL, call run_client_duckdb_query with applyToMap: true to display filtered features on the map, then style with map_style_layer.\n" +
   "\n" +
   "CRITICAL RULES:\n" +
-  "   - map_load_url is for user-provided HTTP/HTTPS URLs AND local file paths from [ATTACHED_LOCAL_FILES].\n" +
+  "   - map_load_url is for user-provided HTTP/HTTPS URLs AND local file paths from [ATTACHED_LOCAL_FILES] (including .geojson, .parquet, .csv, and .json).\n" +
   "     NEVER use it for mapbox://temp/... or Response_URL (those auto-render).\n" +
   "   - ATTACHED LOCAL FILES RULE (CRITICAL):\n" +
   "     When the user attaches local files ([ATTACHED_LOCAL_FILES]), you MUST extract ALL file paths listed.\n" +
   "     If there are multiple files (e.g. 2 files), call `map_load_url` for EACH file separately!\n" +
-  "     Example with 2 files:\n" +
+  "     Example with files:\n" +
   "       1. map_load_url(url='/path/to/file1.geojson', label='file1')\n" +
-  "       2. map_load_url(url='/path/to/file2.geojson', label='file2')\n" +
+  "       2. map_load_url(url='/path/to/data.parquet', label='data')\n" +
   "       3. map_fit_bounds()\n" +
   "     Never skip any attached file! Always load all of them onto the map.\n" +
   "   - map_add_geojson is for raw GeoJSON data you already have. NEVER fabricate GeoJSON.\n" +
@@ -347,13 +423,28 @@ const PLANNER_AGENT_SKILL =
   "DECISION ALGORITHM — follow this for EVERY message:\n" +
   "\n" +
   "Step 1: CLASSIFY the request:\n" +
-  "   Q0 (COLOR, STYLE, & VISUAL CATEGORIZATION): Does the user want to COLOR, STYLE, HIGHLIGHT, CLASSIFY, or VISUALLY CATEGORIZE map features or layers?\n" +
-  '       (Keywords: "color karo", "color code", "rang bharo", "style karo", "south aur north color karo", "region ke basis par color", "speed ke hisab se color", "classify into classes", "sab features ko color karo", "sabko red kardo", "gradient lagao", "styling hata do", "reset style", "apply color", "filter karke color karo")\n' +
-  "       → Usually map_ui_agent with map_style_layer (using valueGroups, rules, or direct mapping)!\n" +
+  "   Q0_LOCUS (PIN / ZIP CODE SCORING, COMPARISON & LOCUSSCORE — HIGHEST PRIORITY):\n" +
+  "       Does the user ask about PIN CODE COMPARISON, ZIP CODE COMPARISON, LOCATION SCORE, or LOCUSSCORE?\n" +
+  "       (Keywords: 'compare 560001 and 560103', '560001 vs 560103', '560001 aur 560103 compare karo', 'pincode compare', 'zip code compare', 'neighbourhood score', 'locus score', 'calculate location score for 560001', '560001 ka score', 'pincode score', 'MG road vs Sarjapur', 'real estate score for pincode', 'retail score for pincode', 'dark store location')\n" +
+  "       - 4-STEP WORKFLOW TO SCORE ANY ZIPCODE:\n" +
+  "         1. Boundary: Fetch zipcode boundary and centroid using get_zip_data(key='zipcode', value='...').\n" +
+  "         2. OSM Query: Fetch canned query template using get_osm_query.\n" +
+  "         3. Amenities Data: Fetch OSM amenities using run_osm_query with queryId, parameters (radius, latitude, longitude), and requested category amenities.\n" +
+  "         4. LocusScore: Calculate score using distance-decay formula: AmenityValue = Σ [ 1 / (1 + distance / 0.5) ] across the 8 categories and sector weights (Real Estate, FMCG/Retail, Quick-Commerce).\n" +
+  "       - If user provides TWO PIN codes or ZIP codes (e.g. 560001 and 560103):\n" +
+  "         → ALWAYS route to map_ui_agent! map_ui_agent calls compare_pincodes_locus_score(pinCodeA, pinCodeB, sector, specificAmenities). Sector defaults to 'real_estate' if not specified. Then send to verifying_agent.\n" +
+  "       - If user provides ONE PIN code or ZIP code (e.g. '560001', 'calculate location score for 560001', '560001 ka score batao'):\n" +
+  "         → ALWAYS route to map_ui_agent! map_ui_agent calls score_pincode_locus(pinCode, sector). Then send to verifying_agent.\n" +
+  "       - If user asks to compare pincodes but DID NOT provide two PIN codes (e.g. 'compare pincodes', 'pincode comparison karo'):\n" +
+  "         → Do NOT call tools yet. Send to verifying_agent to prompt user politely with interactive choice chips: [OPTION: Compare 560001 and 560103 for Real Estate] [OPTION: Compare 560001 and 560103 for FMCG / Retail] [OPTION: Compare 110001 and 110020 for Quick-Commerce]!\n" +
+  "       - If sector or category is missing or ambiguous: inform the user what baseline was assumed (e.g. Real Estate) and provide clickable options [OPTION: Real Estate] [OPTION: FMCG / Retail] [OPTION: Quick-Commerce]!\n" +
+  "   Q0 (COLOR, STYLE, & VISUAL CATEGORIZATION): Does the user want to COLOR, STYLE, HIGHLIGHT, EXTRUDE (3D), CLASSIFY, or VISUALLY CATEGORIZE map features or layers?\n" +
+  '       (Keywords: "color karo", "color code", "rang bharo", "style karo", "3d me dikhao", "extrude karo", "height do", "outline do", "boundary highlight", "heatmap banao", "hexagon grid", "south aur north color karo", "region ke basis par color", "speed ke hisab se color", "classify into classes", "sab features ko color karo", "sabko red kardo", "gradient lagao", "styling hata do", "reset style", "apply color", "filter karke color karo")\n' +
+  "       → Usually map_ui_agent with map_style_layer (using valueGroups, rules, 3D extrusion, or direct mapping)!\n" +
   "       → If the user specifically asks to query/filter data with SQL first before coloring, duckdb_agent can run run_client_duckdb_query (pass applyToMap: true if user wants filtered layer on map), followed by map_style_layer.\n" +
   "   Q1: Does the message contain [SELECTED_MAP_LAYERS] or [MAP_SQL_CONTEXT], or does the user want SQL analytics / queries / area / counts / statistics on map layers or datasets?\n" +
   "       → ALWAYS duckdb_agent! (NEVER playground_agent, NEVER mapbox_agent). duckdb_agent executes run_client_duckdb_query directly in the user's browser.\n" +
-  "   Q2: Does it need GEOGRAPHIC data (places, routes, distances, isochrones, POIs, geocoding, spatial analysis)?\n" +
+  "   Q2: Does it need GEOGRAPHIC data (routes, distances, isochrones, geocoding)?\n" +
   "       → YES → mapbox_agent\n" +
   "   Q3: Does it need PLATFORM data (zip boundaries, user layers, OSM queries)?\n" +
   "       → YES → playground_agent\n" +
@@ -370,6 +461,10 @@ const PLANNER_AGENT_SKILL =
   "Step 3: If verifying_agent says INCOMPLETE → route to correct agent → verify again.\n" +
   "\n" +
   "SCENARIO EXAMPLES (memorize these patterns):\n" +
+  "   '560001 aur 560103 compare karo' → map_ui_agent(compare_pincodes_locus_score) → verify\n" +
+  "   'compare 560001 and 560103 for FMCG' → map_ui_agent(compare_pincodes_locus_score with sector='fmcg_retail') → verify\n" +
+  "   'calculate location score for 560001' → map_ui_agent(score_pincode_locus) → verify\n" +
+  "   '560001 ka score batao' → map_ui_agent(score_pincode_locus) → verify\n" +
   "   'south and north ke basis par color karo' → map_ui_agent(map_style_layer with valueGroups={'South': [...], 'North': [...]}) → verify\n" +
   "   'india ookla ka data ko region ke basis par color karo' + [SELECTED_MAP_LAYERS] → map_ui_agent(map_style_layer with type='category', field='region') → verify\n" +
   "   'region ke basis par color kardo' → map_ui_agent(map_style_layer with type='category', field='region') → verify\n" +
@@ -386,8 +481,9 @@ const PLANNER_AGENT_SKILL =
   "   'Load https://github.com/.../india.geojson' → map_ui_agent(map_load_url) → verify\n" +
   "   'load this data' + [ATTACHED_LOCAL_FILES] → map_ui_agent(map_load_url for each attached file + map_fit_bounds) → verify\n" +
   "   'Find schools' (no region) → playground_agent asks user for region/boundary → STOP (HITL)\n" +
-  "   'Schools in Delhi' → playground_agent(get_district_data for Delhi → get_osm_query → run_osm_query with boundary) → verify\n" +
-  "   'ATMs dikhao' + [ATTACHED_BOUNDARY_CONTEXT] → playground_agent(get_osm_query → run_osm_query with attached polygon) → verify\n" +
+  "   'find all hospitals in 208002 pincode' → playground_agent(get_zip_data for 208002 → run_osm_query with Polygon Search query 610acbb8-9d09-463b-bfcd-74b03e89082f and poly parameter) → verify\n" +
+  "   'Schools in Delhi' → playground_agent(get_district_data for Delhi → run_osm_query with Polygon Search query and boundary poly parameter) → verify\n" +
+  "   'ATMs dikhao' + [ATTACHED_BOUNDARY_CONTEXT] → playground_agent(run_osm_query with Polygon Search query and attached polygon poly parameter) → verify\n" +
   "   'Is map par kitne features / rows hain?' → duckdb_agent(run_client_duckdb_query with COUNT on map_features) → verify\n" +
   "   'Top 5 features by rating / population dikhao' → duckdb_agent(run_client_duckdb_query with ORDER BY) → verify\n" +
   "   'Ye taxi data analyze karo https://...' → duckdb_agent(run_duck_db_queries) → verify\n" +
@@ -397,6 +493,10 @@ const PLANNER_AGENT_SKILL =
   "   'Color code by type' → map_ui_agent(map_style_layer category) → verify\n" +
   "   'Best/Average/Poor me classify karo green/yellow/red' → map_ui_agent(map_style_layer with ranges & sourceField) → verify\n" +
   "   'Population ke hisab se gradient lagao' → map_ui_agent(map_style_layer gradient) → verify\n" +
+  "   '3D me dikhao population ke hisab se' → map_ui_agent(map_style_layer with extruded=true, elevationField='population', elevationScale=0.5) → verify\n" +
+  "   'Tracts ko gold boundary do bina fill ke' → map_ui_agent(map_style_layer with type='solid', filled=false, stroked=true, lineColor='gold', lineWidth=3) → verify\n" +
+  "   'Heatmap banao points ka' → map_ui_agent(map_style_layer with visualizationType='HeatmapLayer', radiusPixels=40) → verify\n" +
+  "   'Hexagon 3D grid me convert karo' → map_ui_agent(map_style_layer with visualizationType='HexagonLayer', extruded=true, radius=1000) → verify\n" +
   "   'Sab features ko red kardo' → map_ui_agent(map_style_layer solid) → verify\n" +
   "   'Styling hata do / reset colors' → map_ui_agent(map_clear_layer_style) → verify\n" +
   "\n" +
@@ -416,12 +516,29 @@ const VERIFYING_AGENT_SKILL =
   "4. Were ALL parts of the user's request addressed? (e.g., user asked for BOTH search + zoom, or multiple files, or area calculation)\n" +
   "5. Were coordinates geocoded, not guessed?\n" +
   "6. For SQL / layer queries: was run_client_duckdb_query executed so results show in the query panel, and was a clear 1-2 sentence summary provided? (Never say table does not exist or ask to re-fetch boundary data)\n" +
+  "7. For Layer Styling & Visualization (map_style_layer): Did the agent report the EXACT layer type (e.g. GeoJsonLayer, HeatmapLayer, HexagonLayer) and the EXACT colors/mapping applied to the map? The reported colors and layer type in chat MUST 100% match what was passed in the map_style_layer tool call — ZERO COLOR HALLUCINATION.\n" +
   "\n" +
   "RESPONSE FORMAT RULES:\n" +
   "   - Multiple places found / Ambiguous locations → List the candidate places with city/state/country context and ALWAYS append `[OPTION: <place name>]` chips for each option so the user can click them directly in chat.\n" +
   "   - Multiple places found (search results) → Markdown TABLE with #, Name, Distance, Category.\n" +
   "   - Route/directions → Blockquote summary (distance, ETA, via). Inline code for road names.\n" +
   "   - Single location → Inline code for name+coords. Blockquote for full address.\n" +
+  "   - Layer Styling & Colors (map_style_layer):\n" +
+  "     * When map_style_layer has been applied, explicitly report the exact visualization type (e.g. GeoJsonLayer, HeatmapLayer, HexagonLayer, ScatterplotLayer, GridLayer) and the EXACT colors/mapping applied (e.g. '🎨 **Layer Styled**: Applied categorical styling with **#3b82f6 Blue** for South and **#ef4444 Red** for North', or 'Solid **#10b981 Emerald**').\n" +
+  "     * ZERO HALLUCINATION MANDATE: Never say in chat a different color than what was passed into the map_style_layer tool call. The map and chat must be 100% deterministic.\n" +
+  "   - PIN Code Comparison / LocusScore Results:\n" +
+  "     * Present a clean Markdown COMPARISON TABLE with columns: Category | Why it Matters in India | Weight | PIN A Score (0-100) | PIN B Score (0-100) | Advantage / Delta.\n" +
+  "     * Give the overall weighted LocusScores for both PIN codes prominently (e.g. 🏠 Real Estate: 560001: 84 | 560103: 61; or 🛒 FMCG: 560001: 90 | 560103: 61).\n" +
+  "     * Explain distance-decay math: `AmenityValue = Σ [ 1 / (1 + distance_km / 0.5) ]` within a 1 km buffer zone. When rendering in chat, use KaTeX-compatible math blocks.\n" +
+  "     * Add credibility calibration slide quote: 'These weights aren't arbitrary, and they get sharper as we ingest your data.'\n" +
+  "     * If user didn't specify business sector, provide interactive chips to switch: [OPTION: Switch to FMCG / Retail] [OPTION: Switch to Quick-Commerce] [OPTION: Switch to Real Estate]\n" +
+  "     * CRITICAL — 4-LAYER MAP VISUALIZATION & COLOR LEGEND EXPLANATION:\n" +
+  "       Explain that 4 separate layers were added to the map and explain their colors clearly:\n" +
+  "       1. Layer 1: Boundary for PIN A (polygon colored by score tier: 🟢 Deep Emerald 85+, 🟩 Green 70-84, 🟡 Amber 55-69, 🟠 Orange 40-54, 🔴 Red <40)\n" +
+  "       2. Layer 2: Amenities for PIN A (dots colored by amenity category)\n" +
+  "       3. Layer 3: Boundary for PIN B (polygon colored by score tier)\n" +
+  "       4. Layer 4: Amenities for PIN B (dots colored by amenity category)\n" +
+  "       Include a '🗺️ Map Layers & Color Legend' section detailing both boundary score colors and category dot colors (Healthcare=Emerald, Education=Indigo, Retail=Purple/Amber, Dining=Orange, Banking=Blue/Cyan, Transit=Violet/Cyan, Recreation=Lime, Civic=Rose)!\n" +
   "   - Always end with ONE short, context-aware follow-up question. Provide 2-3 `[OPTION: <action>]` chips for recommended next steps (e.g. `[OPTION: Show route on map]`, `[OPTION: Find nearby hotels]`).\n" +
   "   - NEVER generate tables from general knowledge. Only from actual tool results.";
 
@@ -444,7 +561,7 @@ export function createADKAgent(
       parameters: clientTool.parameters
         ? convertParametersToZod(clientTool.parameters as any)
         : undefined,
-      execute: (args: any) => {
+      execute: async (args: any) => {
         // Robustness: Validate coordinates before scheduling
         if (
           args.lat !== undefined &&
@@ -461,6 +578,323 @@ export function createADKAgent(
           throw new Error(
             `Invalid longitude: ${args.lng}. Must be between -180 and 180.`,
           );
+        }
+
+        // ── LocusScore Live Computation for Multi-Agent Pipeline ──
+        if (clientTool.name === "compare_pincodes_locus_score") {
+          console.log(`\n================================================================================`);
+          console.log(`🚀 [ADK AGENT] Executing Tool: compare_pincodes_locus_score`);
+          console.log(`   Comparing PIN A: ${args.pinCodeA} VS PIN B: ${args.pinCodeB}`);
+          console.log(`   Sector: ${args.sector || "real_estate"} | Distance Decay (d0): ${args.d0 ?? 0.5} km`);
+          console.log(`   Specific Amenities Filter: ${args.specificAmenities ? JSON.stringify(args.specificAmenities) : "All 8 Categories"}`);
+          console.log(`================================================================================`);
+          try {
+            const { fetchOrResolvePinCode, comparePinCodes, AMENITY_CATEGORIES, SECTOR_PROFILES, getScoreBasedBoundaryColor, generateComparisonColorLegend, generateZipBoundaryGeoJson, generatePinAmenitiesGeoJson } = await import("@/services/locusScoreService");
+            const d0 = typeof args.d0 === "number" ? args.d0 : 0.5;
+            const sector = (args.sector || "real_estate") as any;
+            const requestedCategory = args.specificAmenities?.join(",") || sector;
+            const dataA = await fetchOrResolvePinCode(args.pinCodeA, d0, requestedCategory);
+            const dataB = await fetchOrResolvePinCode(args.pinCodeB, d0, requestedCategory);
+            const comparison = comparePinCodes(dataA, dataB, sector, d0);
+
+            const sectorLabel = (SECTOR_PROFILES as any)[sector]?.name || sector;
+
+            // ═══════════════════════════════════════════════════════════════════
+            // 4-LAYER PIPELINE for Zipcode/Pincode Comparison
+            // ═══════════════════════════════════════════════════════════════════
+            // Layer 1: Zipcode A boundary (score-colored polygon)
+            // Layer 2: Amenities for Zipcode A (category-wise colored points)
+            // Layer 3: Zipcode B boundary (score-colored polygon)
+            // Layer 4: Amenities for Zipcode B (category-wise colored points)
+            // ═══════════════════════════════════════════════════════════════════
+
+            const scoreA = comparison.overallDelta.scoreA;
+            const scoreB = comparison.overallDelta.scoreB;
+            const colorA = getScoreBasedBoundaryColor(scoreA);
+            const colorB = getScoreBasedBoundaryColor(scoreB);
+
+            // ── LAYER 1: Zipcode A Boundary (score-based fill color) ──
+            const boundaryGeoA = generateZipBoundaryGeoJson(dataA, scoreA, sectorLabel);
+            _spatialBuffer.push({
+              toolName: "compare_pincodes_locus_score",
+              label: `Boundary: ${args.pinCodeA} (${dataA.name})`,
+              geojson: boundaryGeoA,
+              metadata: {
+                featureCount: boundaryGeoA.features.length,
+                summary: `Boundary for ${args.pinCodeA} (${dataA.name}) — Score ${scoreA}, Tier: ${colorA.tier}`,
+              },
+            });
+
+            // ── LAYER 2: Amenities for Zipcode A (category-wise colored) ──
+            const amenitiesGeoA = generatePinAmenitiesGeoJson(dataA, `pinA_${args.pinCodeA}`);
+            _spatialBuffer.push({
+              toolName: "compare_pincodes_locus_score",
+              label: `Amenities: ${args.pinCodeA} (${dataA.name})`,
+              geojson: amenitiesGeoA,
+              metadata: {
+                featureCount: amenitiesGeoA.features.length,
+                summary: `${amenitiesGeoA.features.length} amenities inside boundary of ${args.pinCodeA} (${dataA.name})`,
+              },
+            });
+
+            // ── LAYER 3: Zipcode B Boundary (score-based fill color) ──
+            const boundaryGeoB = generateZipBoundaryGeoJson(dataB, scoreB, sectorLabel);
+            _spatialBuffer.push({
+              toolName: "compare_pincodes_locus_score",
+              label: `Boundary: ${args.pinCodeB} (${dataB.name})`,
+              geojson: boundaryGeoB,
+              metadata: {
+                featureCount: boundaryGeoB.features.length,
+                summary: `Boundary for ${args.pinCodeB} (${dataB.name}) — Score ${scoreB}, Tier: ${colorB.tier}`,
+              },
+            });
+
+            // ── LAYER 4: Amenities for Zipcode B (category-wise colored) ──
+            const amenitiesGeoB = generatePinAmenitiesGeoJson(dataB, `pinB_${args.pinCodeB}`);
+            _spatialBuffer.push({
+              toolName: "compare_pincodes_locus_score",
+              label: `Amenities: ${args.pinCodeB} (${dataB.name})`,
+              geojson: amenitiesGeoB,
+              metadata: {
+                featureCount: amenitiesGeoB.features.length,
+                summary: `${amenitiesGeoB.features.length} amenities inside boundary of ${args.pinCodeB} (${dataB.name})`,
+              },
+            });
+
+            console.log(`\n================================================================================`);
+            console.log(`🗺️ [STEP 6: 4-LAYER MAP PIPELINE CREATION]`);
+            console.log(`   • Layer 1 (Boundary A): PIN ${args.pinCodeA} (${dataA.name}) -> Score ${scoreA}/100 [Tier: ${colorA.tier}, Color: ${colorA.label}]`);
+            console.log(`   • Layer 2 (Amenities A): PIN ${args.pinCodeA} (${dataA.name}) -> ${amenitiesGeoA.features.length} POIs with category colors`);
+            console.log(`   • Layer 3 (Boundary B): PIN ${args.pinCodeB} (${dataB.name}) -> Score ${scoreB}/100 [Tier: ${colorB.tier}, Color: ${colorB.label}]`);
+            console.log(`   • Layer 4 (Amenities B): PIN ${args.pinCodeB} (${dataB.name}) -> ${amenitiesGeoB.features.length} POIs with category colors`);
+            console.log(`   🎨 Category Dot Color Legend:`);
+            console.log(`      - Education: Blue (#2563EB)`);
+            console.log(`      - Healthcare: Red (#DC2626)`);
+            console.log(`      - Daily Needs: Amber (#D97706)`);
+            console.log(`      - Food & Beverage: Rose (#E11D48)`);
+            console.log(`      - Banking & Finance: Green (#059669)`);
+            console.log(`      - Transit & Connectivity: Violet (#7C3AED)`);
+            console.log(`      - Recreation & Open Space: Emerald (#10B981)`);
+            console.log(`      - Civic & Community: Sky (#0284C7)`);
+            console.log(`   ✅ Queued all 4 layers to spatialDataBuffer for Deck.gl map.`);
+            console.log(`================================================================================\n`);
+
+            // Generate color legend for the verifying_agent to explain to user
+            const colorLegend = generateComparisonColorLegend(dataA, dataB, scoreA, scoreB, sector);
+
+            // Construct category breakdown summary for verifying_agent
+            const categorySummary = Object.entries(comparison.categoryDeltas).map(([catId, catData]: [string, any]) => {
+              const catConfig = (AMENITY_CATEGORIES as any)[catId];
+              const profile = (SECTOR_PROFILES as any)[sector];
+              const weightPct = (((profile?.weights as any)?.[catId] || 0) * 100).toFixed(0);
+              return {
+                category: catConfig?.label || catId,
+                whyItMatters: catConfig?.whyItMatters || "",
+                weight: `${weightPct}%`,
+                scoreA: catData.scoreA,
+                scoreB: catData.scoreB,
+                diff: catData.diff > 0 ? `+${catData.diff} (${args.pinCodeA})` : catData.diff < 0 ? `+${Math.abs(catData.diff)} (${args.pinCodeB})` : "Equal",
+                winner: catData.winner === "A" ? args.pinCodeA : catData.winner === "B" ? args.pinCodeB : "Tie"
+              };
+            });
+
+            return {
+              _type: "client_tool_call",
+              toolName: clientTool.name,
+              args: args,
+              status: "success",
+              pinCodeA: args.pinCodeA,
+              nameA: dataA.name,
+              cityA: dataA.city,
+              overallScoreA: comparison.overallDelta.scoreA,
+              boundaryColorA: colorA.label,
+              pinCodeB: args.pinCodeB,
+              nameB: dataB.name,
+              cityB: dataB.city,
+              overallScoreB: comparison.overallDelta.scoreB,
+              boundaryColorB: colorB.label,
+              winner: comparison.overallDelta.winner === "A" ? args.pinCodeA : comparison.overallDelta.winner === "B" ? args.pinCodeB : "Tie",
+              sector: comparison.sector,
+              sectorLabel,
+              takeaways: comparison.narrativeTakeaways,
+              categoryBreakdown: categorySummary,
+              colorLegend,
+              layerStructure: "4-layer pipeline: Layer 1 = Boundary of " + args.pinCodeA + " (score-colored), Layer 2 = Amenities of " + args.pinCodeA + " (category-colored), Layer 3 = Boundary of " + args.pinCodeB + " (score-colored), Layer 4 = Amenities of " + args.pinCodeB + " (category-colored)",
+              message: `Successfully calculated LocusScore comparison for PIN ${args.pinCodeA} (${dataA.name}) and PIN ${args.pinCodeB} (${dataB.name}) under ${sectorLabel} sector profile via 4-layer pipeline. Scores: ${comparison.overallDelta.scoreA} vs ${comparison.overallDelta.scoreB}. 4 map layers queued: 2 boundary polygons (score-colored) + 2 amenity layers (category-colored).`,
+            };
+          } catch (e: any) {
+            console.error("Error in compare_pincodes_locus_score execution:", e);
+            return {
+              _type: "client_tool_call",
+              toolName: clientTool.name,
+              args: args,
+              status: "partial",
+              message: `Queued comparison for ${args.pinCodeA} and ${args.pinCodeB} on map.`,
+            };
+          }
+        }
+
+        if (clientTool.name === "score_pincode_locus") {
+          try {
+            const { fetchOrResolvePinCode } = await import("@/services/locusScoreService");
+            const d0 = typeof args.d0 === "number" ? args.d0 : 0.5;
+            const sector = (args.sector || "real_estate") as any;
+            const data = await fetchOrResolvePinCode(args.pinCode, d0, args.specificAmenities || args.category || sector);
+
+            // Queue boundary polygon if available
+            if (data.polygonCoordinates && data.polygonCoordinates.length > 0) {
+              _spatialBuffer.push({
+                toolName: "score_pincode_locus",
+                label: `Boundary ${args.pinCode}`,
+                geojson: {
+                  type: "FeatureCollection",
+                  features: [
+                    {
+                      type: "Feature",
+                      geometry: {
+                        type: "Polygon",
+                        coordinates: [data.polygonCoordinates],
+                      },
+                      properties: {
+                        pinCode: args.pinCode,
+                        name: data.name,
+                        city: data.city,
+                        score: (data.sectorScores as any)[sector],
+                        fillColor: [79, 70, 229, 50],
+                        strokeColor: [79, 70, 229, 230],
+                      },
+                    },
+                  ],
+                },
+                metadata: {
+                  featureCount: 1,
+                  summary: `Zipcode boundary polygon for ${args.pinCode}`,
+                },
+              });
+            }
+
+            // Queue POIs strictly inside the boundary
+            if (data.pois && data.pois.length > 0) {
+              _spatialBuffer.push({
+                toolName: "score_pincode_locus",
+                label: `Amenities: PIN ${args.pinCode}`,
+                geojson: {
+                  type: "FeatureCollection",
+                  features: data.pois.map((poi) => {
+                    const { category, color } = getAmenityCategoryAndColor(poi);
+                    return {
+                      type: "Feature",
+                      geometry: {
+                        type: "Point",
+                        coordinates: [poi.lng, poi.lat],
+                      },
+                      properties: {
+                        name: poi.name,
+                        title: poi.name,
+                        category,
+                        amenity: poi.amenityTag,
+                        distanceKm: poi.distanceKm,
+                        decayWeight: poi.decayWeight,
+                        address: poi.address,
+                        fillColor: color,
+                        color,
+                        strokeColor: [255, 255, 255, 240],
+                        lineColor: [255, 255, 255, 240],
+                        pointRadius: 25,
+                        radius: 25,
+                      },
+                    };
+                  }),
+                },
+                metadata: {
+                  featureCount: data.pois.length,
+                  summary: `${data.pois.length} amenities strictly inside boundary of PIN ${args.pinCode}`,
+                },
+              });
+            }
+
+            return {
+              _type: "client_tool_call",
+              toolName: clientTool.name,
+              args: args,
+              status: "success",
+              pinCode: args.pinCode,
+              areaName: data.name,
+              city: data.city,
+              character: data.character,
+              sectorScores: data.sectorScores,
+              normalizedScores: data.normalizedScores,
+              selectedSectorScore: (data.sectorScores as any)[sector],
+              poiCounts: data.poiCounts,
+              message: `Successfully scored PIN ${args.pinCode} (${data.name}) via 4-step pipeline (get_zip_data boundary -> get_osm_query -> run_osm_query amenities -> distance-decay scoring). Real Estate: ${data.sectorScores.real_estate}, FMCG/Retail: ${data.sectorScores.fmcg_retail}, Quick-Commerce: ${data.sectorScores.quick_commerce}.`,
+            };
+          } catch (e: any) {
+            console.error("Error in score_pincode_locus execution:", e);
+            return {
+              _type: "client_tool_call",
+              name: clientTool.name,
+              args: args,
+              status: "partial",
+              message: `Queued scoring for ${args.pinCode} on map.`,
+            };
+          }
+        }
+
+        if (clientTool.name === "map_style_layer") {
+          const style = args.style || {};
+          const layerRef = args.layerId || (args.layerIndex !== undefined ? `layer #${args.layerIndex}` : "active layer");
+          const candidateViz = args.visualizationType || style.visualizationType || style.type;
+          const visType = candidateViz === "HeatmapLayer" || candidateViz === "heatmap"
+            ? "HeatmapLayer"
+            : candidateViz === "HexagonLayer" || candidateViz === "hexagon"
+              ? "HexagonLayer"
+              : candidateViz === "ScatterplotLayer" || candidateViz === "scatterplot"
+                ? "ScatterplotLayer"
+                : candidateViz === "GridLayer" || candidateViz === "grid"
+                  ? "GridLayer"
+                  : "GeoJsonLayer";
+          return {
+            _type: "client_tool_call",
+            name: clientTool.name,
+            args: args,
+            appliedLayer: layerRef,
+            visualizationType: visType,
+            styleType: style.type || "solid",
+            appliedColors: {
+              fillColor: style.fillColor || null,
+              lineColor: style.lineColor || null,
+              mapping: style.mapping || null,
+              minColor: style.minColor || null,
+              maxColor: style.maxColor || null,
+              colorRange: style.colorRange || null,
+              palette: style.palette || null,
+            },
+            message: `Successfully applied deterministic style to ${layerRef}. Visualization: ${visType}. Style: ${style.type || "solid"}. The Deck.gl layer rendered with these exact colors on the map. You MUST report these EXACT colors and layer type in your response to the user.`,
+          };
+        }
+
+        if (clientTool.name === "map_clear_layer_style") {
+          const layerRef = args.layerId || (args.layerIndex !== undefined ? `layer #${args.layerIndex}` : "active layer");
+          return {
+            _type: "client_tool_call",
+            name: clientTool.name,
+            args: args,
+            appliedLayer: layerRef,
+            message: `Successfully cleared custom styling for ${layerRef}. Reverted to default styling.`,
+          };
+        }
+
+        if (clientTool.name === "run_client_duckdb_query") {
+          const queryText = args.queryText || args.query || args.sql || args.sqlQuery || args.query_text || "";
+          return {
+            _type: "client_tool_call",
+            name: clientTool.name,
+            args: {
+              ...args,
+              queryText,
+            },
+            message: `Scheduled client DuckDB query on map layer: "${queryText ? queryText.substring(0, 80) : "active layer"}". Results will appear in the Query Results Panel.`,
+          };
         }
 
         return {
@@ -489,9 +923,7 @@ export function createADKAgent(
     (t) => t.name === "map_clear_layer_style",
   );
 
-  const mapUiClientTools = adkClientTools.filter(
-    (t) => t.name !== "run_client_duckdb_query",
-  );
+  const mapUiClientTools = adkClientTools;
 
   // 2. Set up the Mapbox MCP Toolset (filtering out Claude Desktop iframe UI tools)
   console.log(`[Mapbox MCP] Query: "${userPrompt || "none"}"`);
@@ -503,8 +935,13 @@ export function createADKAgent(
     private disallowed = new Set(["render_map_tool", "static_map_image_tool"]);
 
     override async getTools(context?: any) {
-      const tools = await super.getTools(context);
-      return tools.filter((t: any) => !this.disallowed.has(t.name));
+      try {
+        const tools = await super.getTools(context);
+        return tools.filter((t: any) => !this.disallowed.has(t.name));
+      } catch (err: any) {
+        console.warn("⚠️ [ADK Agent] Failed to load Mapbox MCP tools:", err?.message || err);
+        return [];
+      }
     }
   }
 
@@ -528,7 +965,19 @@ export function createADKAgent(
   });
 
   // 3. Set up the Playg MCP Toolsets
-  const playgMcpToolset = new MCPToolset({
+  class SafeDuckDbPlaygMCPToolset extends MCPToolset {
+    override async getTools(context?: any) {
+      try {
+        const tools = await super.getTools(context);
+        return tools;
+      } catch (err: any) {
+        console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for DuckDB:", err?.message || err);
+        return [];
+      }
+    }
+  }
+
+  const playgMcpToolset = new SafeDuckDbPlaygMCPToolset({
     type: "StdioConnectionParams",
     serverParams: {
       command: "node",
@@ -542,7 +991,7 @@ export function createADKAgent(
         REDIS_URL: "redis://localhost:6379",
         BEARER_TOKEN:
           "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTcwNTg3N30.eSXBYQ-yAfPqdWVfNxS8Y8AR9uMA5VlGX3j_k0elnik",
-        INSTANCE_PATH: "/Users/vishalkushwaha/test.duckdb",
+        INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
         FILE_PATH: "",
       } as Record<string, string>,
     },
@@ -553,8 +1002,13 @@ export function createADKAgent(
     private disallowed = new Set(["run_duck_db_queries"]);
 
     override async getTools(context?: any) {
-      const tools = await super.getTools(context);
-      return tools.filter((t: any) => !this.disallowed.has(t.name));
+      try {
+        const tools = await super.getTools(context);
+        return tools.filter((t: any) => !this.disallowed.has(t.name));
+      } catch (err: any) {
+        console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for Playground:", err?.message || err);
+        return [];
+      }
     }
   }
 
@@ -572,7 +1026,7 @@ export function createADKAgent(
         REDIS_URL: "redis://localhost:6379",
         BEARER_TOKEN:
           "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTcwNTg3N30.eSXBYQ-yAfPqdWVfNxS8Y8AR9uMA5VlGX3j_k0elnik",
-        INSTANCE_PATH: "/Users/vishalkushwaha/test.duckdb",
+        INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
         FILE_PATH: "",
       } as Record<string, string>,
     },
@@ -614,17 +1068,25 @@ export function createADKAgent(
       }
 
       let normalized = extracted.normalized;
-      const rawParsed = extracted.rawParsed;
+      let rawParsed = extracted.rawParsed;
 
       // Handle async fetch cases (Response_URL, mapbox:// URI, HTTP URL)
       if (!normalized && rawParsed?._needsFetch && rawParsed?._responseUrl) {
         console.log(`  ↳ Fetching Response_URL: ${rawParsed._responseUrl}`);
         try {
           const fetchRes = await fetch(rawParsed._responseUrl);
-          const jsonData = await fetchRes.json();
+          let jsonData = await fetchRes.json();
+          if (typeof jsonData === "string") {
+            try {
+              jsonData = JSON.parse(jsonData);
+            } catch {}
+          }
           const { normalizeToGeoJSON } =
             await import("@/utils/spatialNormalizer");
           normalized = normalizeToGeoJSON(jsonData, toolName);
+          if (jsonData) {
+            rawParsed = jsonData;
+          }
         } catch (e) {
           console.error(`  ↳ Failed to fetch Response_URL:`, e);
           return undefined;
@@ -646,14 +1108,76 @@ export function createADKAgent(
         }
       }
 
-      let suffix = Math.random().toString(36).slice(2, 6);
-      if (params.args) {
-        const val = Object.values(params.args)[0];
-        if (typeof val === "string") {
-          suffix = val.substring(0, 20);
+      // Track active boundary in BoundaryClipper
+      if ((toolName === "get_zip_data" || toolName === "get_district_data") && normalized?.features?.length > 0) {
+        const { setActiveBoundary } = await import("./utils/boundaryClipper");
+        const pinCodeVal = params.args?.value || params.args?.zipcode;
+        const pinHint = typeof pinCodeVal === "string" ? pinCodeVal.replace(/\D/g, "") : undefined;
+        setActiveBoundary(normalized, pinHint, toolName);
+      }
+
+      // For run_osm_query: strictly clip POIs by boundary polygon
+      let osmOutsideCount = 0;
+      if (toolName === "run_osm_query") {
+        const { getActiveBoundary, clipFeaturesStrictlyToBoundary } = await import("./utils/boundaryClipper");
+        
+        let pinCodeHint: string | undefined;
+        const promptPinMatch = userPrompt?.match(/\b[1-9][0-9]{5}\b/);
+        if (promptPinMatch) pinCodeHint = promptPinMatch[0];
+
+        const activeBoundary = await getActiveBoundary(pinCodeHint);
+        if (activeBoundary && normalized?.features) {
+          const clipResult = clipFeaturesStrictlyToBoundary(
+            normalized.features,
+            activeBoundary,
+            pinCodeHint
+          );
+          normalized.features = clipResult.inside;
+          osmOutsideCount = clipResult.outsideCount;
+        }
+
+        // If no features are inside the boundary, return handled response so fallback never adds external points!
+        if (!normalized?.features || normalized.features.length === 0) {
+          console.log(`🎯 [Spatial Interceptor] 0 features inside boundary for run_osm_query (${osmOutsideCount} external points discarded).`);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `✅ 0 amenities found strictly inside the zipcode boundary (${osmOutsideCount} external amenities located outside the polygon boundary were filtered out).`,
+              },
+            ],
+            _spatialDataExtracted: true,
+          };
         }
       }
-      const uniqueLabel = `${toolName}_${suffix}`;
+
+      let suffix = Math.random().toString(36).slice(2, 6);
+      if (params.args) {
+        if (Array.isArray(params.args.amenities) && params.args.amenities.length > 0) {
+          suffix = String(params.args.amenities[0]).replace(/[^\w]/g, "_");
+        } else {
+          const val = Object.values(params.args)[0];
+          if (typeof val === "string") {
+            suffix = val.substring(0, 20);
+          }
+        }
+      }
+      let uniqueLabel = `${toolName}_${suffix}`;
+      if (toolName === "run_osm_query") {
+        try {
+          const { getActiveBoundary } = await import("./utils/boundaryClipper");
+          let pinCodeHint: string | undefined;
+          const promptPinMatch = userPrompt?.match(/\b[1-9][0-9]{5}\b/);
+          if (promptPinMatch) pinCodeHint = promptPinMatch[0];
+          const activeBoundary = await getActiveBoundary(pinCodeHint);
+          const pin = activeBoundary?.pinCode || pinCodeHint;
+          if (pin) {
+            uniqueLabel = `Amenities (PIN ${pin})`;
+          } else if (activeBoundary?.name) {
+            uniqueLabel = `Amenities (${activeBoundary.name})`;
+          }
+        } catch {}
+      }
 
       if (!normalized && rawParsed?._needsMcpResolve && rawParsed?._mapboxUri) {
         // Resolve directions and isochrone selffetch URIs immediately so LLM gets a rich summary
@@ -712,19 +1236,55 @@ export function createADKAgent(
 
       if (normalized?.features?.length > 0) {
         const metadata = extractMetadata(rawParsed, normalized.features.length);
-        const summary = createLightweightSummary(toolName, metadata, rawParsed);
+        if (toolName === "get_zip_data" || toolName === "get_district_data") {
+          try {
+            const { getActiveBoundary } = await import("./utils/boundaryClipper");
+            const boundaryMeta = await getActiveBoundary();
+            if (boundaryMeta) {
+              metadata.centroid = boundaryMeta.centroid;
+              metadata.boundingRadiusMeters = boundaryMeta.boundingRadiusMeters;
+            }
+          } catch {}
+        }
+        let summary = createLightweightSummary(toolName, metadata, rawParsed);
+        if (toolName === "run_osm_query") {
+          summary = `✅ Found ${normalized.features.length} amenities strictly inside the boundary (${osmOutsideCount} external points filtered out). All ${normalized.features.length} inside amenities have been rendered on the map.`;
+        }
 
         console.log(
           `  ✅ Intercepted ${normalized.features.length} features from ${toolName}. LLM gets summary only.`,
         );
 
         // Store in shared buffer for route.ts to read
-        _spatialBuffer.push({
-          toolName,
-          label: uniqueLabel,
-          geojson: normalized,
-          metadata,
-        });
+        // If an amenities layer for this label already exists in _spatialBuffer, merge features into it!
+        const existingAmenityBufferIndex = _spatialBuffer.findIndex(
+          (b) => b.label === uniqueLabel && b.geojson?.features
+        );
+
+        if (existingAmenityBufferIndex !== -1) {
+          const target = _spatialBuffer[existingAmenityBufferIndex];
+          const seen = new Set(
+            target.geojson.features.map(
+              (f: any) => `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`
+            )
+          );
+          const newToAdd = normalized.features.filter((f: any) => {
+            const key = `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`;
+            return !seen.has(key);
+          });
+          target.geojson.features.push(...newToAdd);
+          target.metadata.featureCount = target.geojson.features.length;
+          console.log(
+            `📦 [Spatial Interceptor] Merged ${newToAdd.length} features into existing layer "${uniqueLabel}" (Total: ${target.geojson.features.length}).`
+          );
+        } else {
+          _spatialBuffer.push({
+            toolName,
+            label: uniqueLabel,
+            geojson: normalized,
+            metadata,
+          });
+        }
 
         // Return lightweight summary to LLM (replaces the full GeoJSON)
         return {
@@ -980,18 +1540,20 @@ ${AGENT_SAFETY_STAND_RULE}`,
     model: modelToUse,
     name: "map_ui_agent",
     description:
-      "Executes map UI actions: fly_to, zoom, draw, markers, map_load_url, add_geojson, clear map, base map, geometry ops.",
-    instruction: `You are the Map UI specialist. You execute map display actions using client-side tools.
+      "LocusScore & Map UI specialist: Computes PIN / ZIP code Location Intelligence & Livability scores across 8 OSM categories (Education, Healthcare, Daily Needs, F&B, Banking, Transit, Recreation, Civic) for Real Estate, FMCG / Retail, and Quick-Commerce via score_pincode_locus and compare_pincodes_locus_score, and controls map display (fly_to, zoom, draw, markers, layers, styles).",
+    instruction: `You are the Map UI & LocusScore specialist. You calculate PIN code location intelligence (compare_pincodes_locus_score, score_pincode_locus) and execute map display actions using client-side tools.
 
 ${MAP_UI_AGENT_SKILL}
 
 AGENT BOUNDARY (CRITICAL — VIOLATION CAUSES SYSTEM CRASH):
 - You do NOT have access to Mapbox MCP tools (search_and_geocode_tool, directions_tool, distance_tool, category_search_tool, etc.).
-- You do NOT have access to Playground tools (get_zip_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers) or DuckDB tools (run_client_duckdb_query).
+- You do NOT have access to Playground tools (get_zip_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers). You have access to all client-side map tools and run_client_duckdb_query for in-browser SQL filtering and layer styling.
 - NEVER attempt to call tools you don't have. If you need spatial data or geocoded coordinates, return what's missing in your summary. The planner will route to the correct data agent.
 - If you accidentally try to call a tool you don't own, the system will crash with an error. This is YOUR fault — avoid it.
 
 EXECUTION RULES:
+- If asked to compare two PIN codes: call compare_pincodes_locus_score(pinCodeA, pinCodeB, sector, specificAmenities).
+- If asked to score a single PIN code or find amenities in a PIN code: call score_pincode_locus(pinCode, sector, specificAmenities).
 - You will receive coordinates, spatial data URLs, and context from the conversation history.
 - Use the appropriate map tool with the correct arguments (lat, lng, zoom, url, etc.).
 - If a previous agent provided a user-given HTTP URL to display, use 'map_load_url'. If it returned mapbox:// or Response_URL, DO NOT use map_load_url — the system auto-renders those.
@@ -1042,6 +1604,29 @@ IF EVERYTHING IS COMPLETE (AND NO ERRORS DETECTED):
 - Follow the RESPONSE FORMAT RULES above for proper formatting.
 - You are the ONLY agent that should produce user-facing text.
 
+LOCUSSCORE & PIN CODE INTELLIGENCE RULES (CRITICAL):
+- LocusScore tools ('score_pincode_locus' for a single PIN, 'compare_pincodes_locus_score' for two PINs) belong EXCLUSIVELY to map_ui_agent (NOT playground_agent, NOT duckdb_agent).
+- When map_ui_agent has called 'compare_pincodes_locus_score' or 'score_pincode_locus', the data calculation and map layer rendering are COMPLETE!
+- In your final response, explicitly highlight the 4-step pipeline executed:
+  1. Boundary & Centroid: Fetched via get_zip_data
+  2. OSM Query Template: Resolved via get_osm_query
+  3. Real Amenities Dataset: Fetched via run_osm_query for the requested categories/amenities
+  4. LocusScore Calculation: Distance-decay formula: AmenityValue = Σ [ 1 / (1 + distance_km / 0.5) ] across the 8 categories, and weighted across Real Estate, FMCG/Retail, and Quick-Commerce.
+- You MUST write the complete, final Markdown response directly to the user:
+  * For comparison: Markdown comparison table (8 categories with weights, scores, deltas), overall scores, distance-decay explanation, calibration quote, and interactive [OPTION: ...] chips.
+    CRITICAL: You MUST include a dedicated "🗺️ Map Layers & Color Legend" section explaining the 4 layers plotted on the map and their exact color coding:
+    - Layer 1: Boundary for PIN A (polygon colored by score tier)
+    - Layer 2: Amenities for PIN A (points colored by amenity category)
+    - Layer 3: Boundary for PIN B (polygon colored by score tier)
+    - Layer 4: Amenities for PIN B (points colored by amenity category)
+    - Clearly explain each boundary color and amenity category dot color so the user understands the map visuals at a glance!
+  * For single PIN score: Overall sector score, category breakdown table, distance-decay formula note, calibration quote, and comparison option chips.
+- If the user asked for PIN comparison or PIN scoring and NO tool has run yet:
+  * If two PIN codes are present: report "INCOMPLETE: Need map_ui_agent to call compare_pincodes_locus_score."
+  * If one PIN code is present: report "INCOMPLETE: Need map_ui_agent to call score_pincode_locus."
+  * If no PIN codes were provided (e.g. "compare pincodes"): respond directly to the user asking which two PIN codes and sector to compare, with clickable [OPTION: ...] chips.
+- NEVER blame playground_agent or duckdb_agent for PIN scoring. They do not own LocusScore.
+
 IF SOMETHING IS MISSING OR FAILED:
 - Return a technical message starting with "INCOMPLETE:" followed by exactly what is still pending.
   Example: "INCOMPLETE: Data was fetched but not displayed on the map. Need map_ui_agent to fly_to and add markers."
@@ -1074,13 +1659,16 @@ To route a task to another agent, you MUST call the tool matching their exact na
 
 STEP 1 — ROUTE TO THE RIGHT WORK AGENT:
 Use the DECISION ALGORITHM above. Read the user's LATEST message and transfer to the correct agent using their specific transfer tool:
+- 'map_ui_agent':
+  * CRITICAL — LOCUSSCORE & PIN INTELLIGENCE: Handles ALL PIN code scoring, location scores, and dual PIN/ZIP comparisons (score_pincode_locus, compare_pincodes_locus_score). When the user asks about ANY PIN code score (e.g. 560001), PIN comparison (e.g. 560001 vs 560103), or LocusScore: ALWAYS transfer to 'map_ui_agent' FIRST! NEVER transfer directly to verifying_agent without first transferring to map_ui_agent!
+  * Map display actions: fly_to, zoom, draw shapes, add markers, load GeoJSON/URLs, clear map, change base map, rotate, style layer.
 - 'mapbox_agent': Search places, geocoding, directions, isochrones, category search, distance, geometric ops — anything geographic/spatial.
-- 'playground_agent': Zip boundary data, user layers, OSM queries — anything platform/Playground.
+- 'playground_agent': Zip boundary data, user layers, OSM queries — anything platform/Playground (NOT PIN scoring or LocusScore).
 - 'duckdb_agent': Analyze datasets, files (Parquet, CSV, GeoJSON, Shapefile), URLs, map layers, or existing DuckDB tables using SQL queries. Automatically uses client-side DuckDB (run_client_duckdb_query) for most queries (including heavy/complex analysis if intended by user) on visible map layers, or backend (run_duck_db_queries) for backend-specific remote analysis.
-- 'map_ui_agent': Fly to location, zoom, draw shapes, add markers, load GeoJSON/URLs, clear map, change base map, ROTATE, reset rotation — any map display action.
 
 MAP UI TOOL ROUTING (MEMORIZE THIS):
-These tools belong EXCLUSIVELY to map_ui_agent. NEVER route these to mapbox_agent or playground_agent:
+These tools belong EXCLUSIVELY to map_ui_agent. NEVER route these to mapbox_agent, playground_agent, or duckdb_agent:
+→ compare_pincodes_locus_score, score_pincode_locus
 → map_rotate, map_reset_rotation, map_zoom_in, map_zoom_out, map_set_zoom, map_fly_to, map_fit_bounds
 → map_set_base, map_clear_layers, map_toggle_layer
 → map_add_marker, map_remove_marker, map_move_marker, map_add_geojson, map_load_url
@@ -1097,6 +1685,7 @@ Repeat until verifying_agent confirms everything is done.
 
 STEP 4 — ERROR RECOVERY (CRITICAL):
 If a work agent returns an error like "Function X is not found in the toolsDict" or "UNKNOWN_ERROR", this means the task was sent to the WRONG agent. Do NOT give up. Immediately re-classify the failed tool and route to the CORRECT agent:
+- Failed tool is score_pincode_locus or compare_pincodes_locus_score → Route to map_ui_agent
 - Failed tool starts with map_* (map_rotate, map_zoom, map_fly_to, etc.) → Route to map_ui_agent
 - Failed tool is an MCP tool (search_*, directions_*, distance_*, category_*) → Route to mapbox_agent
 - Failed tool is a platform tool (get_zip_*, get_osm_*, get_user_*) → Route to playground_agent
@@ -1127,7 +1716,7 @@ ROUTING — follow these rules for EVERY message:
 1. GENERAL CHAT (greetings, "what can you do?", jokes, chitchat) → Answer directly yourself.
 2. ANYTHING MAP/DATA/SQL RELATED → Transfer to 'planner_agent' IMMEDIATELY. Do not answer yourself.
 
-Map/data/SQL includes: search, directions, zoom, draw, zip data, show on map, clear map, base map, SQL queries, layer analysis, area calculations, [SELECTED_MAP_LAYERS], [MAP_SQL_CONTEXT], and ALL follow-up requests like "ab isko map pe dikhao", "zoom in karo", "search another place", "clear karo".
+Map/data/SQL includes: search, directions, zoom, draw, zip data, PIN code scoring, PIN code comparison, LocusScore, location score, neighbourhood livability, show on map, clear map, base map, SQL queries, layer analysis, area calculations, [SELECTED_MAP_LAYERS], [MAP_SQL_CONTEXT], and ALL follow-up requests like "ab isko map pe dikhao", "zoom in karo", "search another place", "clear karo".
 ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,

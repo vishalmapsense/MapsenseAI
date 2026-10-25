@@ -30,14 +30,28 @@ function cleanValue(val: unknown): any {
   if (val instanceof Date) return val.toISOString();
   if (val instanceof Uint8Array) {
     try {
-      return new TextDecoder().decode(val);
+      const decoder = new TextDecoder("utf-8", { fatal: true });
+      const text = decoder.decode(val);
+      // Even if UTF-8 didn't throw, check for null bytes or control characters indicating binary WKB
+      if (/[\x00-\x08\x0E-\x1F]/.test(text)) {
+        return Array.from(val).map((b) => b.toString(16).padStart(2, "0")).join("");
+      }
+      return text;
     } catch {
-      return Array.from(val);
+      // Binary data (e.g. WKB geometry) -> return hex string
+      return Array.from(val).map((b) => b.toString(16).padStart(2, "0")).join("");
     }
   }
   if (typeof val === "object") {
     if (typeof (val as any).toJSON === "function") {
-      return (val as any).toJSON();
+      try {
+        return cleanValue((val as any).toJSON());
+      } catch {
+        // fallback
+      }
+    }
+    if (Array.isArray(val)) {
+      return val.map(cleanValue);
     }
   }
   return val;
@@ -370,6 +384,11 @@ export class ClientDuckDBService {
    */
   public async registerLocalFile(filePath: string, customTableName?: string): Promise<string> {
     await this.init();
+    try {
+      await this.loadSpatialExtension();
+    } catch {
+      // spatial load is best-effort
+    }
 
     const rawName = filePath.split("/").pop() || "data_file";
     const tableName = customTableName || sanitizeTableName(rawName);
@@ -432,6 +451,11 @@ export class ClientDuckDBService {
    */
   public async registerRemoteUrl(url: string, customTableName?: string): Promise<string> {
     await this.init();
+    try {
+      await this.loadSpatialExtension();
+    } catch {
+      // spatial load is best-effort
+    }
 
     const rawName = url.split("/").pop()?.split("?")[0] || "remote_data";
     const tableName = customTableName || sanitizeTableName(rawName);
@@ -603,7 +627,7 @@ export class ClientDuckDBService {
    * Executes a SQL query directly in client-side DuckDB-Wasm.
    * Automatically resolves missing tables from registered data references.
    */
-  public async runQuery(queryText: string): Promise<QueryResultData> {
+  public async runQuery(queryText: string, isRetry = false): Promise<QueryResultData> {
     await this.init();
 
     const startTime = performance.now();
@@ -615,18 +639,41 @@ export class ClientDuckDBService {
     let preparedQuery = await this.resolveAndLoadTables(queryText);
 
     // Step 2: Normalize spatial function calls in client DuckDB-Wasm
-    // DuckDB-Wasm in browser lacks the native spatial extension, but all geometries
-    // already have precomputed columns: centroid, center_lat, center_lng, lat, lng, area_sq_km, area_sq_meters, perimeter_km.
+    // DuckDB-Wasm in browser stores geometries as precomputed columns & GeoJSON VARCHAR:
+    // centroid, center_lat, center_lng, lat, lng, area_sq_km, area_sq_meters, perimeter_km, geometry.
+
+    // 2a. ST_AsGeoJSON normalization:
+    // In client DuckDB-Wasm tables, geometry columns are ALREADY stored as GeoJSON text (VARCHAR/JSON).
+    // DuckDB spatial ST_AsGeoJSON() expects a GEOMETRY type and fails with Binder Error: 'ST_AsGeoJSON(VARCHAR)'.
+    // Unnest ST_AsGeoJSON(ST_GeomFromGeoJSON(col)) -> col
+    preparedQuery = preparedQuery.replace(
+      /ST_AsGeoJSON\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*([a-zA-Z0-9_".]+)\s*\)\s*\)/gi,
+      "$1"
+    );
+
+    // Unnest ST_AsGeoJSON(col::GEOMETRY) or ST_AsGeoJSON(CAST(col AS GEOMETRY)) -> col
+    preparedQuery = preparedQuery.replace(
+      /ST_AsGeoJSON\s*\(\s*(?:CAST\s*\(\s*([a-zA-Z0-9_".]+)\s+AS\s+GEOMETRY\s*\)|([a-zA-Z0-9_".]+)::GEOMETRY)\s*\)/gi,
+      (_match, p1, p2) => p1 || p2
+    );
+
+    // Replace ST_AsGeoJSON(col) -> col where col is an identifier / column reference (not a function call returning GEOMETRY)
+    preparedQuery = preparedQuery.replace(
+      /ST_AsGeoJSON\s*\(\s*([a-zA-Z0-9_".]+)\s*\)/gi,
+      "$1"
+    );
+
+    // 2b. Precomputed geometry property column normalization
     preparedQuery = preparedQuery
-      .replace(/ST_AsText\s*\(\s*ST_Centroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)\s*\)/gi, "centroid")
-      .replace(/ST_Centroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)/gi, "centroid")
-      .replace(/ST_Centroid\s*\(\s*geometry\s*\)/gi, "centroid")
-      .replace(/ST_Area_Spheroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)\s*\/\s*1000000(?:\.0)?/gi, "area_sq_km")
-      .replace(/ST_Area_Spheroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)/gi, "area_sq_meters")
-      .replace(/ST_Area\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)/gi, "area_sq_meters")
-      .replace(/ST_Area\s*\(\s*geometry\s*\)/gi, "area_sq_meters")
-      .replace(/ST_Length\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*geometry\s*\)\s*\)/gi, "perimeter_km")
-      .replace(/ST_Length\s*\(\s*geometry\s*\)/gi, "perimeter_km");
+      .replace(/ST_AsText\s*\(\s*ST_Centroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)\s*\)/gi, "centroid")
+      .replace(/ST_Centroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)/gi, "centroid")
+      .replace(/ST_Centroid\s*\(\s*(?:(?:\w+\.)?(?:geometry|geom|the_geom|wkb_geometry|shape|"[^"]+"))\s*\)/gi, "centroid")
+      .replace(/ST_Area_Spheroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)\s*\/\s*1000000(?:\.0)?/gi, "area_sq_km")
+      .replace(/ST_Area_Spheroid\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)/gi, "area_sq_meters")
+      .replace(/ST_Area\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)/gi, "area_sq_meters")
+      .replace(/ST_Area\s*\(\s*(?:(?:\w+\.)?(?:geometry|geom|the_geom|wkb_geometry|shape|"[^"]+"))\s*\)/gi, "area_sq_meters")
+      .replace(/ST_Length\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*(?:[a-zA-Z0-9_".]+)\s*\)\s*\)/gi, "perimeter_km")
+      .replace(/ST_Length\s*\(\s*(?:(?:\w+\.)?(?:geometry|geom|the_geom|wkb_geometry|shape|"[^"]+"))\s*\)/gi, "perimeter_km");
 
     // Step 3: Handle __layer_name matching in WHERE clauses so that whether the LLM queried
     // by tableName, raw layerTitle, or alias, it matches regardless of casing or formatting.
@@ -717,6 +764,25 @@ export class ClientDuckDBService {
     } catch (err: any) {
       console.error(`❌ [ClientDuckDB] Query failed:`, err);
       const errMsg = err?.message || String(err);
+
+      // Auto-recovery: If ST_AsGeoJSON failed due to type mismatch on VARCHAR or JSON
+      if (
+        !isRetry &&
+        (errMsg.includes("ST_AsGeoJSON(VARCHAR)") ||
+          errMsg.includes("ST_AsGeoJSON(JSON)") ||
+          (errMsg.includes("ST_AsGeoJSON") && errMsg.includes("Candidate functions")))
+      ) {
+        console.warn("⚠️ [ClientDuckDB] Auto-recovering from ST_AsGeoJSON type mismatch on VARCHAR/JSON...");
+        const fixedQuery = queryText
+          .replace(/ST_AsGeoJSON\s*\(\s*ST_GeomFromGeoJSON\s*\(\s*([^()]+)\s*\)\s*\)/gi, "$1")
+          .replace(/ST_AsGeoJSON\s*\(\s*(?:CAST\s*\(\s*([^()]+)\s+AS\s+GEOMETRY\s*\)|([^()]+)::GEOMETRY)\s*\)/gi, (_m, p1, p2) => p1 || p2)
+          .replace(/ST_AsGeoJSON\s*\(\s*([^()]+)\s*\)/gi, "$1");
+        if (fixedQuery !== queryText) {
+          console.log(`🦆 [ClientDuckDB] Retrying query with unwrapped geometry: ${fixedQuery}`);
+          return await this.runQuery(fixedQuery, true);
+        }
+      }
+
       if (errMsg.includes("spatial extension") || errMsg.includes("st_distance")) {
         throw new Error(
           `DuckDB Spatial Error: ${errMsg}. Note: Coordinates (lng, lat) can also be used directly: SQRT(POW(lng - target_lng, 2) + POW(lat - target_lat, 2)).`

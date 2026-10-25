@@ -1,14 +1,18 @@
 "use client";
 
-import React, { useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo, useEffect } from "react";
 import { useMapStore } from "@/stores/useMapStore";
+import { useChatStore } from "@/stores/useChatStore";
+import { saveLayer } from "@/services/layerSyncService";
 import type {
   LayerStyle,
   RGBAColor,
+  ColorInput,
   CategoryStyle,
   GradientStyle,
   SolidStyle,
 } from "@/types/layerStyle.types";
+import { parseRGBAColor } from "@/utils/propertyResolver";
 import {
   Paintbrush,
   X,
@@ -21,6 +25,7 @@ import {
   Check,
   Tag,
   Layers,
+  CircleDot,
 } from "lucide-react";
 
 interface LayerStylePanelProps {
@@ -29,13 +34,17 @@ interface LayerStylePanelProps {
   onClose?: () => void;
 }
 
-/** Convert RGBA to CSS rgba() string */
-const rgbaToCss = (c: RGBAColor): string =>
-  `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${(c[3] / 255).toFixed(2)})`;
+/** Convert ColorInput to CSS rgba() string */
+const rgbaToCss = (c: ColorInput): string => {
+  const parsed = parseRGBAColor(c);
+  return `rgba(${parsed[0]}, ${parsed[1]}, ${parsed[2]}, ${(parsed[3] / 255).toFixed(2)})`;
+};
 
-/** Convert RGBA to hex string (without alpha) */
-const rgbaToHex = (c: RGBAColor): string =>
-  `#${c[0].toString(16).padStart(2, "0")}${c[1].toString(16).padStart(2, "0")}${c[2].toString(16).padStart(2, "0")}`;
+/** Convert ColorInput to hex string (without alpha) */
+const rgbaToHex = (c: ColorInput): string => {
+  const parsed = parseRGBAColor(c);
+  return `#${parsed[0].toString(16).padStart(2, "0")}${parsed[1].toString(16).padStart(2, "0")}${parsed[2].toString(16).padStart(2, "0")}`;
+};
 
 /** Convert hex to RGBA with given alpha */
 const hexToRGBA = (hex: string, alpha: number): RGBAColor => {
@@ -155,8 +164,27 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
   const setMapFeatureLayerStyle = useMapStore((s) => s.setMapFeatureLayerStyle);
   const clearMapFeatureLayerStyle = useMapStore((s) => s.clearMapFeatureLayerStyle);
 
-  const currentStyle = mapFeatureLayerStyles[layerIndex] || null;
+  const activeSessionId = useChatStore((s) => s.activeSessionId);
   const layerData = mapFeatures[layerIndex];
+  const currentStyle = mapFeatureLayerStyles[layerIndex] || (layerData as any)?._layerStyle || null;
+
+  // Auto-persist styled layer to Supabase for the active session
+  useEffect(() => {
+    if (!activeSessionId || activeSessionId.startsWith("shared-")) return;
+    if (!currentStyle) return;
+
+    const timer = setTimeout(() => {
+      const currentLayers = useMapStore.getState().mapFeatures;
+      const currentLayer = currentLayers[layerIndex];
+      if (currentLayer) {
+        saveLayer(activeSessionId, layerIndex, layerName || `Layer ${layerIndex + 1}`, currentLayer, true, true).catch((e) =>
+          console.warn("[LayerStylePanel] Auto-save styled layer warning:", e)
+        );
+      }
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [activeSessionId, layerIndex, layerName, currentStyle]);
 
   // Features list
   const features = useMemo(() => {
@@ -205,7 +233,9 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
   // Current active mode tab
   const activeMode: "category" | "gradient" | "solid" = useMemo(() => {
     if (!currentStyle) return "category";
-    return currentStyle.type;
+    if (currentStyle.type === "gradient") return "gradient";
+    if (currentStyle.type === "solid") return "solid";
+    return "category";
   }, [currentStyle]);
 
   // Active field
@@ -225,11 +255,11 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
   // Calculate current opacity (0-100)
   const currentOpacity = useMemo(() => {
     if (!currentStyle) return 70;
-    if (currentStyle.type === "solid") return Math.round((currentStyle.fillColor[3] / 255) * 100);
-    if (currentStyle.type === "gradient") return Math.round((currentStyle.maxColor[3] / 255) * 100);
+    if (currentStyle.type === "solid") return Math.round((parseRGBAColor(currentStyle.fillColor)[3] / 255) * 100);
+    if (currentStyle.type === "gradient") return Math.round((parseRGBAColor(currentStyle.maxColor)[3] / 255) * 100);
     if (currentStyle.type === "category") {
       const first = Object.values(currentStyle.mapping)[0];
-      return first ? Math.round((first.fillColor[3] / 255) * 100) : 70;
+      return first ? Math.round((parseRGBAColor(first.fillColor)[3] / 255) * 100) : 70;
     }
     return 70;
   }, [currentStyle]);
@@ -430,9 +460,10 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
       const newMapping: typeof currentStyle.mapping = {};
       keys.forEach((key, idx) => {
         const c = palette[idx % palette.length];
+        const alpha = parseRGBAColor(currentStyle.mapping[key]?.fillColor)[3] ?? currentAlpha;
         newMapping[key] = {
           ...currentStyle.mapping[key],
-          fillColor: [c[0], c[1], c[2], currentStyle.mapping[key]?.fillColor?.[3] ?? currentAlpha],
+          fillColor: [c[0], c[1], c[2], alpha],
         };
       });
       setMapFeatureLayerStyle(layerIndex, {
@@ -447,10 +478,12 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
   // Apply a gradient preset
   const handleApplyGradientPreset = (minC: RGBAColor, maxC: RGBAColor) => {
     if (currentStyle?.type === "gradient") {
+      const minAlpha = parseRGBAColor(currentStyle.minColor)[3];
+      const maxAlpha = parseRGBAColor(currentStyle.maxColor)[3];
       setMapFeatureLayerStyle(layerIndex, {
         ...currentStyle,
-        minColor: [minC[0], minC[1], minC[2], currentStyle.minColor[3]],
-        maxColor: [maxC[0], maxC[1], maxC[2], currentStyle.maxColor[3]],
+        minColor: [minC[0], minC[1], minC[2], minAlpha],
+        maxColor: [maxC[0], maxC[1], maxC[2], maxAlpha],
       });
     } else {
       applyGradientStyleForField(activeField, minC, maxC);
@@ -460,7 +493,7 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
   // Single category color change
   const handleSingleCategoryColorChange = (key: string, hex: string) => {
     if (!currentStyle || currentStyle.type !== "category") return;
-    const curAlpha = currentStyle.mapping[key]?.fillColor?.[3] ?? currentAlpha;
+    const curAlpha = parseRGBAColor(currentStyle.mapping[key]?.fillColor)[3] ?? currentAlpha;
     setMapFeatureLayerStyle(layerIndex, {
       ...currentStyle,
       mapping: {
@@ -492,22 +525,26 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
       return;
     }
     if (currentStyle.type === "solid") {
+      const c = parseRGBAColor(currentStyle.fillColor);
       setMapFeatureLayerStyle(layerIndex, {
         ...currentStyle,
-        fillColor: [currentStyle.fillColor[0], currentStyle.fillColor[1], currentStyle.fillColor[2], newAlpha],
+        fillColor: [c[0], c[1], c[2], newAlpha],
       });
     } else if (currentStyle.type === "gradient") {
+      const minC = parseRGBAColor(currentStyle.minColor);
+      const maxC = parseRGBAColor(currentStyle.maxColor);
       setMapFeatureLayerStyle(layerIndex, {
         ...currentStyle,
-        minColor: [currentStyle.minColor[0], currentStyle.minColor[1], currentStyle.minColor[2], newAlpha],
-        maxColor: [currentStyle.maxColor[0], currentStyle.maxColor[1], currentStyle.maxColor[2], newAlpha],
+        minColor: [minC[0], minC[1], minC[2], newAlpha],
+        maxColor: [maxC[0], maxC[1], maxC[2], newAlpha],
       });
     } else if (currentStyle.type === "category") {
       const newMapping: typeof currentStyle.mapping = {};
       for (const [k, v] of Object.entries(currentStyle.mapping)) {
+        const c = parseRGBAColor(v.fillColor);
         newMapping[k] = {
           ...v,
-          fillColor: [v.fillColor[0], v.fillColor[1], v.fillColor[2], newAlpha],
+          fillColor: [c[0], c[1], c[2], newAlpha],
         };
       }
       setMapFeatureLayerStyle(layerIndex, {
@@ -517,8 +554,51 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
     }
   };
 
+  // Check if layer has Point or MultiPoint features
+  const hasPoints = useMemo(() => {
+    if (!features || features.length === 0) return true;
+    return features.some((f: any) => {
+      const geomType = f?.geometry?.type;
+      return geomType === "Point" || geomType === "MultiPoint";
+    });
+  }, [features]);
+
+  // Current point radius in pixels
+  const currentPointRadius = useMemo(() => {
+    if (currentStyle && typeof currentStyle.pointRadius === "number") {
+      return currentStyle.pointRadius;
+    }
+    const sampleR = features[0]?.properties?.pointRadius ?? features[0]?.properties?.radius;
+    if (typeof sampleR === "number" && sampleR >= 15) return sampleR;
+    return 25; // Default 25px
+  }, [currentStyle, features]);
+
+  // Point radius slider change handler
+  const handlePointRadiusChange = (radius: number) => {
+    if (!currentStyle) {
+      const sampleColor = features[0]?.properties?.fillColor || features[0]?.properties?.color || [59, 130, 246, currentAlpha];
+      setMapFeatureLayerStyle(layerIndex, {
+        type: "solid",
+        fillColor: sampleColor,
+        pointRadius: radius,
+      });
+      return;
+    }
+    setMapFeatureLayerStyle(layerIndex, {
+      ...currentStyle,
+      pointRadius: radius,
+    });
+  };
+
   const handleReset = () => {
     clearMapFeatureLayerStyle(layerIndex);
+    if (activeSessionId && !activeSessionId.startsWith("shared-")) {
+      const currentLayers = useMapStore.getState().mapFeatures;
+      const currentLayer = currentLayers[layerIndex];
+      if (currentLayer) {
+        saveLayer(activeSessionId, layerIndex, layerName || `Layer ${layerIndex + 1}`, currentLayer, true, true).catch(console.warn);
+      }
+    }
   };
 
   return (
@@ -774,9 +854,10 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
                         type="color"
                         value={rgbaToHex(currentStyle.minColor)}
                         onChange={(e) => {
+                          const alpha = parseRGBAColor(currentStyle.minColor)[3];
                           setMapFeatureLayerStyle(layerIndex, {
                             ...currentStyle,
-                            minColor: hexToRGBA(e.target.value, currentStyle.minColor[3]),
+                            minColor: hexToRGBA(e.target.value, alpha),
                           });
                         }}
                         className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
@@ -801,9 +882,10 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
                         type="color"
                         value={rgbaToHex(currentStyle.maxColor)}
                         onChange={(e) => {
+                          const alpha = parseRGBAColor(currentStyle.maxColor)[3];
                           setMapFeatureLayerStyle(layerIndex, {
                             ...currentStyle,
-                            maxColor: hexToRGBA(e.target.value, currentStyle.maxColor[3]),
+                            maxColor: hexToRGBA(e.target.value, alpha),
                           });
                         }}
                         className="opacity-0 absolute inset-0 w-full h-full cursor-pointer"
@@ -891,6 +973,35 @@ export const LayerStylePanel: React.FC<LayerStylePanelProps> = ({
               className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
             />
           </div>
+
+          {/* ─── CIRCLE RADIUS SLIDER (POINT LAYERS) ────────────────────── */}
+          {hasPoints && (
+            <div className="pt-2 border-t border-border/40 space-y-1.5 px-1">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-muted-foreground font-medium flex items-center gap-1.5">
+                  <CircleDot className="w-3 h-3 text-muted-foreground/70" />
+                  <span>Circle Radius (Point Size)</span>
+                </span>
+                <span className="font-mono text-primary font-semibold text-[10px] bg-primary/10 px-1.5 py-0.5 rounded">
+                  {currentPointRadius}px
+                </span>
+              </div>
+              <input
+                type="range"
+                min="2"
+                max="100"
+                step="1"
+                value={currentPointRadius}
+                onChange={(e) => handlePointRadiusChange(Number(e.target.value))}
+                className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-primary"
+              />
+              <div className="flex justify-between text-[9px] text-muted-foreground/60 px-0.5">
+                <span>2px</span>
+                <span>25px (Default)</span>
+                <span>100px</span>
+              </div>
+            </div>
+          )}
 
           {/* ─── ACTION FOOTER ─────────────────────────────────────────── */}
           <div className="pt-2 border-t border-border/40 flex items-center justify-between px-1">

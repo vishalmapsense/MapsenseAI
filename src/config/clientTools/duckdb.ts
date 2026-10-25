@@ -30,6 +30,14 @@ export const DUCKDB_CLIENT_TOOLS: ClientToolDefinition[] = [
           description:
             "The SQL query to execute in client DuckDB-Wasm. Example: 'SELECT COUNT(*) FROM map_features;' or 'SELECT name, rating FROM map_features ORDER BY rating DESC LIMIT 5;'",
         },
+        query: {
+          type: "string",
+          description: "Alias for queryText. The SQL query to execute in client DuckDB-Wasm.",
+        },
+        sql: {
+          type: "string",
+          description: "Alias for queryText. The SQL query to execute in client DuckDB-Wasm.",
+        },
         description: {
           type: "string",
           description: "Brief explanation of what this query does for the user.",
@@ -45,7 +53,6 @@ export const DUCKDB_CLIENT_TOOLS: ClientToolDefinition[] = [
             "Optional title/label for the map layer when applyToMap is true (e.g. 'South States', 'High Rating Restaurants').",
         },
       },
-      required: ["queryText"],
       additionalProperties: false,
     },
     strict: false,

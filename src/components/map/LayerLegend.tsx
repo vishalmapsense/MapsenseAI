@@ -2,15 +2,18 @@
 
 import React, { useState, useEffect } from "react";
 import { useMapStore } from "@/stores/useMapStore";
-import type { RGBAColor, LayerStyle } from "@/types/layerStyle.types";
+import type { RGBAColor, LayerStyle, ColorInput } from "@/types/layerStyle.types";
+import { parseRGBAColor } from "@/utils/propertyResolver";
 import { ChevronDown, ChevronUp, X } from "lucide-react";
 
-/** Convert RGBA to CSS rgba() string */
-const rgbaToCss = (c: RGBAColor): string =>
-  `rgba(${c[0]}, ${c[1]}, ${c[2]}, ${(c[3] / 255).toFixed(2)})`;
+/** Convert ColorInput to CSS rgba() string */
+const rgbaToCss = (c: ColorInput): string => {
+  const parsed = parseRGBAColor(c);
+  return `rgba(${parsed[0]}, ${parsed[1]}, ${parsed[2]}, ${(parsed[3] / 255).toFixed(2)})`;
+};
 
 /** Build a CSS linear-gradient string from min/max colors */
-const gradientCss = (minC: RGBAColor, maxC: RGBAColor): string =>
+const gradientCss = (minC: ColorInput, maxC: ColorInput): string =>
   `linear-gradient(to right, ${rgbaToCss(minC)}, ${rgbaToCss(maxC)})`;
 
 /**
@@ -33,14 +36,14 @@ export const LayerLegend: React.FC = () => {
     setDismissed(false);
   }, [mapFeatureLayerStyles]);
 
-  // Collect all styled layers
-  const styledLayers = Object.entries(mapFeatureLayerStyles)
-    .filter(([idx]) => Number(idx) < mapFeatures.length) // Only existing layers
-    .map(([idx, style]) => ({
-      index: Number(idx),
-      style,
-      name: extractName(mapFeatures[Number(idx)], Number(idx)),
-    }));
+  // Collect all styled layers (associated directly with the layers)
+  const styledLayers = mapFeatures
+    .map((feat, idx) => ({
+      index: idx,
+      style: mapFeatureLayerStyles[idx] || (feat as any)?._layerStyle,
+      name: extractName(feat, idx),
+    }))
+    .filter((l): l is { index: number; style: LayerStyle; name: string } => Boolean(l.style));
 
   if (styledLayers.length === 0 || dismissed) return null;
 

@@ -14,6 +14,7 @@ import { DRAWING_TOOLS } from "./drawing";
 import { INTERACTION_TOOLS } from "./interaction";
 import { DUCKDB_CLIENT_TOOLS } from "./duckdb";
 import { STYLING_TOOLS } from "./styling";
+import { LOCUS_SCORE_TOOLS } from "./locusScore";
 import type { ClientToolDefinition, JsonSchemaProperty, JsonSchemaParameters } from "@/config/clientTools/types";
 import type { MCPTool } from "@/types/mcp.types";
 
@@ -26,6 +27,7 @@ export const CLIENT_TOOL_DEFINITIONS: ClientToolDefinition[] = [
   ...INTERACTION_TOOLS,
   ...DUCKDB_CLIENT_TOOLS,
   ...STYLING_TOOLS,
+  ...LOCUS_SCORE_TOOLS,
 ];
 
 // ─── JSON Schema → Gemini Schema Converter ────────────────────
@@ -131,6 +133,14 @@ export function buildClientToolResponse(
   toolName: string,
   args: Record<string, unknown>
 ): object {
+  if (toolName === "compare_pincodes_locus_score" || toolName === "score_pincode_locus") {
+    return {
+      status: "success",
+      tool: toolName,
+      message: `LocusScore action '${toolName}' executed and map layers queued. You MUST generate a full user response with the Markdown comparison table, overall scores, 8-category breakdown, distance-decay formula note, and clickable [OPTION: ...] chips.`,
+      appliedArgs: args,
+    };
+  }
   return {
     status: "success",
     tool: toolName,
@@ -147,4 +157,5 @@ export { DRAWING_TOOLS } from "./drawing";
 export { INTERACTION_TOOLS } from "./interaction";
 export { DUCKDB_CLIENT_TOOLS } from "./duckdb";
 export { STYLING_TOOLS } from "./styling";
+export { LOCUS_SCORE_TOOLS } from "./locusScore";
 export type { ClientToolDefinition } from "./types";

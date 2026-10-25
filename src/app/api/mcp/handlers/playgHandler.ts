@@ -27,7 +27,7 @@ async function getPlaygMcpClient(): Promise<Client> {
       USER_AGENT: "playg-mcp-server/1.0",
       REDIS_URL: "redis://localhost:6379",
       BEARER_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig",
-      INSTANCE_PATH: "/Users/vishalkushwaha/test.duckdb",
+      INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
       FILE_PATH: "",
     },
   });
@@ -56,4 +56,42 @@ export async function getPlaygTools(): Promise<any> {
     console.error("[Playg MCP] Failed to get tools:", error.message);
     return { tools: [] };
   }
+}
+
+export async function callPlaygTool(
+  name: string,
+  args: Record<string, any> = {}
+): Promise<any> {
+  const client = await getPlaygMcpClient();
+  return client.callTool({ name, arguments: args });
+}
+
+export async function fetchPlaygJson(urlOrResponseText: string): Promise<any> {
+  let url = urlOrResponseText;
+  if (url.includes("Response_URL: ")) {
+    url = url.split("Response_URL: ")[1].trim();
+  }
+  const token =
+    process.env.BEARER_TOKEN ||
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig";
+
+  const res = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Playg JSON (${res.status}): ${res.statusText}`);
+  }
+
+  const raw = await res.json();
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  return raw;
 }

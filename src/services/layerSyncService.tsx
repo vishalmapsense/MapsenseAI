@@ -55,8 +55,13 @@ export async function fetchSessionLayers(sessionId: string): Promise<any[]> {
     }
     const data = await res.json();
     if (data.success && Array.isArray(data.layers)) {
-      // Return just the geojson data, ordered by layer_index
-      const geojsonData = data.layers.map((l: PersistedLayer) => l.geojson);
+      // Return just the geojson data, ordered by layer_index, preserving layer metadata
+      const geojsonData = data.layers.map((l: PersistedLayer) => {
+        const gj = l.geojson || {};
+        if (!gj._layerId) gj._layerId = l.id;
+        if (!gj._layerName && l.layer_name) gj._layerName = l.layer_name;
+        return gj;
+      });
       // Store in cache
       layerCache[sessionId] = geojsonData;
       return geojsonData;
@@ -182,7 +187,8 @@ export async function saveLayer(
   layerIndex: number,
   layerName: string,
   geojson: any,
-  forceSave: boolean = false
+  forceSave: boolean = false,
+  silent: boolean = false
 ): Promise<boolean> {
   // Always update in-memory cache immediately so layer persists across UI re-renders
   if (!layerCache[sessionId]) layerCache[sessionId] = [];
@@ -292,6 +298,16 @@ export async function saveLayer(
     return true;
   })();
 
+  if (silent) {
+    try {
+      await savePromise;
+      return true;
+    } catch (err) {
+      console.warn(`[LayerSync] Silent save failed for "${layerName}":`, err);
+      return false;
+    }
+  }
+
   toast.promise(savePromise, {
     loading: `Saving "${layerName}" (${sizeMb} MB)...`,
     success: `"${layerName}" saved successfully`,
@@ -380,10 +396,8 @@ export async function syncAllLayers(sessionId: string, layers: any[]): Promise<b
 
     // Then save each layer with correct index
     const promises = layers.map((geojson, idx) => {
-      const firstFeature = geojson?.features?.[0] || (geojson?.type === "Feature" ? geojson : null);
-      const props = firstFeature?.properties || {};
-      const layerName = props.name || props.title || props.instruction || `Layer ${idx + 1}`;
-      return saveLayer(sessionId, idx, layerName, geojson);
+      const layerName = extractLayerName(geojson) || `Layer ${idx + 1}`;
+      return saveLayer(sessionId, idx, layerName, geojson, true, true);
     });
 
     const results = await Promise.all(promises);
@@ -408,6 +422,7 @@ export async function syncAllLayers(sessionId: string, layers: any[]): Promise<b
  * Extract a readable layer name from a GeoJSON feature/collection.
  */
 export function extractLayerName(geojson: any): string {
+  if (geojson?._layerName) return geojson._layerName;
   const firstFeature = geojson?.features?.[0] || (geojson?.type === "Feature" ? geojson : null);
   const props = firstFeature?.properties || {};
   return props.name || props.title || props.instruction || "Layer";

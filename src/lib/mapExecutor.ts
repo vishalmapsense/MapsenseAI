@@ -10,12 +10,14 @@ import {
   deleteAllLayers,
   extractLayerName,
 } from "@/services/layerSyncService";
+import { sanitizeTableName } from "@/stores/useDataReferenceStore";
 import {
   resolveFeatureProperty,
   parseNumericValue,
   hashStringToColor,
   DYNAMIC_PALETTE,
   CURATED_PALETTES,
+  parseRGBAColor,
 } from "@/utils/propertyResolver";
 
 export interface CommandResult {
@@ -221,29 +223,84 @@ export const executeClientCommands = async (
             const normalized = normalizeToGeoJSON(rawGeojson, label);
             if (normalized) {
               const store = useMapStore.getState();
-              const newIndex = store.mapFeatures.length;
-              store.setMapFeatures([...store.mapFeatures, normalized]);
 
-              // Persist: save-after-success — layer rendered on map, now persist
-              if (sessionId) {
-                saveLayer(
-                  sessionId,
-                  newIndex,
-                  extractLayerName(normalized) || label,
-                  normalized,
-                ).catch((e) =>
-                  console.error(
-                    "[MapExecutor] Failed to persist layer to Supabase:",
-                    e,
-                  ),
-                );
-              }
-
-              results.push({
-                success: true,
-                code: "SUCCESS",
-                message: `Added spatial feature '${label}' to the map.`,
+              // Check if an existing layer on the map matches this label (e.g. "Amenities (PIN 208002)")
+              const cleanLabel = (label || "").trim();
+              const existingIndex = store.mapFeatures.findIndex((existing) => {
+                const existingName = extractLayerName(existing) || existing.properties?.name || existing.name;
+                if (!existingName) return false;
+                const cleanExisting = String(existingName).trim();
+                if (cleanExisting === cleanLabel) return true;
+                const pinInClean = cleanLabel.match(/\b\d{6}\b/)?.[0];
+                const pinInExisting = cleanExisting.match(/\b\d{6}\b/)?.[0];
+                if (pinInClean && pinInExisting && pinInClean === pinInExisting) {
+                  if (cleanLabel.toLowerCase().includes("boundary") && cleanExisting.toLowerCase().includes("boundary")) return true;
+                  if (cleanLabel.toLowerCase().includes("amenit") && cleanExisting.toLowerCase().includes("amenit")) return true;
+                }
+                return false;
               });
+
+              if (existingIndex !== -1) {
+                // Layer already exists on the map! Merge features into the existing layer
+                const existingLayer = normalizeToGeoJSON(store.mapFeatures[existingIndex], cleanLabel);
+                const existingFeatures = existingLayer?.features || [];
+                const seen = new Set(
+                  existingFeatures.map(
+                    (f: any) =>
+                      `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`
+                  )
+                );
+                const newToAdd = (normalized.features || []).filter((f: any) => {
+                  const key = `${f.properties?.name || ""}_${f.geometry?.coordinates?.join(",")}`;
+                  return !seen.has(key);
+                });
+                const mergedLayer = {
+                  ...existingLayer,
+                  features: [...existingFeatures, ...newToAdd],
+                };
+                const updated = [...store.mapFeatures];
+                updated[existingIndex] = mergedLayer;
+                store.setMapFeatures(updated);
+                console.log(
+                  `🗺️ [MapExecutor] Merged ${newToAdd.length} features into existing layer "${cleanLabel}" (Total: ${mergedLayer.features.length}).`
+                );
+
+                if (sessionId) {
+                  saveLayer(sessionId, existingIndex, cleanLabel, mergedLayer).catch((e) =>
+                    console.error("[MapExecutor] Failed to update merged layer in Supabase:", e)
+                  );
+                }
+
+                results.push({
+                  success: true,
+                  code: "SUCCESS",
+                  message: `Merged ${newToAdd.length} features into layer '${cleanLabel}' on the map.`,
+                });
+              } else {
+                const newIndex = store.mapFeatures.length;
+                store.setMapFeatures([...store.mapFeatures, normalized]);
+
+                // Persist: save-after-success — layer rendered on map, now persist
+                if (sessionId) {
+                  saveLayer(
+                    sessionId,
+                    newIndex,
+                    extractLayerName(normalized) || label,
+                    normalized,
+                  ).catch((e) =>
+                    console.error(
+                      "[MapExecutor] Failed to persist layer to Supabase:",
+                      e,
+                    ),
+                  );
+                }
+
+                results.push({
+                  success: true,
+                  code: "SUCCESS",
+                  message: `Added spatial feature '${label}' to the map.`,
+                });
+              }
             } else {
               throw new Error("Could not parse or normalize spatial data.");
             }
@@ -256,11 +313,85 @@ export const executeClientCommands = async (
           const url = cmd.payload?.url;
           const label = cmd.payload?.label || "External Layer";
           if (typeof url === "string") {
-            const normalized = await fetchAndNormalizeSpatialUrl(url, label);
+            const lowerUrl = url.toLowerCase().split("?")[0];
+            const isParquet = lowerUrl.endsWith(".parquet");
+            const isCsv = lowerUrl.endsWith(".csv");
+
+            let normalized: any = null;
+
+            if (isParquet || isCsv) {
+              console.log(`🦆 [MapExecutor] Loading ${isParquet ? "Parquet" : "CSV"} file via DuckDB: ${url}`);
+              const { clientDuckDB } = await import("@/services/duckdb/clientDuckDB");
+              const { convertQueryResultToFeatures } = await import("@/utils/spatialQueryHelper");
+
+              const isLocal =
+                url.startsWith("/") ||
+                url.startsWith("file://") ||
+                /^[a-zA-Z]:[\\/]/.test(url) ||
+                url.startsWith("./") ||
+                url.startsWith("../");
+
+              let tableName: string;
+              if (isLocal) {
+                const cleanPath = url.replace(/^file:\/\//, "");
+                tableName = await clientDuckDB.registerLocalFile(cleanPath);
+              } else {
+                tableName = await clientDuckDB.registerRemoteUrl(url);
+              }
+
+              // Query features from DuckDB-Wasm (up to 100,000 features)
+              let queryResult: any;
+              try {
+                queryResult = await clientDuckDB.runQuery(`SELECT * FROM "${tableName}" LIMIT 100000;`);
+              } catch (selectErr: any) {
+                console.warn("[MapExecutor] SELECT * failed, falling back to casting geometry as VARCHAR:", selectErr);
+                try {
+                  queryResult = await clientDuckDB.runQuery(`SELECT * EXCLUDE (geometry), geometry::VARCHAR AS geometry FROM "${tableName}" LIMIT 100000;`);
+                } catch {
+                  throw selectErr;
+                }
+              }
+
+              // Add to chat store so QueryResultsPanel opens with this table
+              try {
+                const { useChatStore } = await import("@/stores/useChatStore");
+                useChatStore.getState().addQueryResults([queryResult]);
+              } catch (e) {
+                console.warn("[MapExecutor] Could not push query result to panel:", e);
+              }
+
+              const features = convertQueryResultToFeatures(queryResult);
+              if (features.length > 0) {
+                const layerId = `duckdb_${tableName}_${Date.now()}`;
+                features.forEach((f: any) => {
+                  if (f.properties) f.properties._layerId = layerId;
+                });
+                normalized = {
+                  type: "FeatureCollection",
+                  features,
+                  properties: {
+                    title: label,
+                    name: label,
+                    source: isParquet ? "parquet" : "csv",
+                    source_url: url,
+                    layerId,
+                    rowCount: features.length,
+                  },
+                };
+              } else {
+                throw new Error(
+                  `Loaded table "${tableName}" from ${isParquet ? "Parquet" : "CSV"} file, but no spatial coordinates (lat/lng), geometry, bbox, or quadkey columns were found to map.`
+                );
+              }
+            } else {
+              normalized = await fetchAndNormalizeSpatialUrl(url, label);
+            }
+
             if (normalized) {
               const store = useMapStore.getState();
               const newIndex = store.mapFeatures.length;
               store.setMapFeatures([...store.mapFeatures, normalized]);
+              store.triggerZoomToFit();
 
               // Persist: save-after-success
               if (sessionId) {
@@ -280,7 +411,7 @@ export const executeClientCommands = async (
               results.push({
                 success: true,
                 code: "SUCCESS",
-                message: `Loaded spatial feature from URL.`,
+                message: `Loaded ${normalized.features?.length || 1} spatial features from ${isParquet ? "Parquet" : isCsv ? "CSV" : "URL"}.`,
               });
             } else {
               throw new Error(
@@ -568,11 +699,80 @@ export const executeClientCommands = async (
           break;
         }
         case "RUN_CLIENT_DUCKDB_QUERY": {
-          const queryText = cmd.payload?.queryText;
-          if (!queryText || typeof queryText !== "string") {
-            throw new Error(
-              "Missing queryText parameter for client DuckDB query.",
-            );
+          let queryText =
+            cmd.payload?.queryText ||
+            cmd.payload?.query ||
+            cmd.payload?.sql ||
+            cmd.payload?.sqlQuery ||
+            cmd.payload?.query_text ||
+            cmd.payload?.sql_query ||
+            cmd.payload?.q;
+
+          if (typeof cmd.payload === "string") {
+            const trimmedPayload = cmd.payload.trim();
+            if (trimmedPayload.startsWith("{")) {
+              try {
+                const parsed = JSON.parse(trimmedPayload);
+                queryText =
+                  parsed.queryText ||
+                  parsed.query ||
+                  parsed.sql ||
+                  parsed.sqlQuery ||
+                  parsed.query_text ||
+                  queryText;
+              } catch {}
+            } else if (/^SELECT\b|^WITH\b|^INSTALL\b|^DESCRIBE\b|^SHOW\b/i.test(trimmedPayload)) {
+              queryText = trimmedPayload;
+            }
+          }
+
+          if (cmd.payload && typeof cmd.payload === "object" && cmd.payload.args && typeof cmd.payload.args === "object") {
+            queryText =
+              queryText ||
+              cmd.payload.args.queryText ||
+              cmd.payload.args.query ||
+              cmd.payload.args.sql ||
+              cmd.payload.args.sqlQuery ||
+              cmd.payload.args.query_text;
+          }
+
+          const store = useMapStore.getState();
+          const currentMapFeatures = store.mapFeatures;
+
+          // If queryText is still missing or not a string, synthesize an intelligent fallback query
+          if (!queryText || typeof queryText !== "string" || queryText.trim().length === 0) {
+            console.warn("⚠️ [MapExecutor] queryText was omitted in RUN_CLIENT_DUCKDB_QUERY command payload:", cmd.payload);
+            const targetIndex =
+              typeof cmd.payload?.layerIndex === "number"
+                ? cmd.payload.layerIndex
+                : (store.selectedLayerIndex ?? 0);
+            const activeLayer = currentMapFeatures[targetIndex] || currentMapFeatures[0];
+
+            if (activeLayer) {
+              const layerName = extractLayerName(activeLayer) || activeLayer?.properties?.name || `layer_${targetIndex + 1}`;
+              const tableName = sanitizeTableName(layerName);
+              const sampleProps = activeLayer?.features?.[0]?.properties || activeLayer?.properties || {};
+
+              // Find metric or population column if available
+              const metricCol = Object.keys(sampleProps).find((k) =>
+                !k.startsWith("_") && /^(pop|population|total_pop|totpop|tract|count|density|value|rating|score)/i.test(k)
+              ) || Object.keys(sampleProps).find((k) => !k.startsWith("_") && typeof sampleProps[k] === "number");
+
+              if (metricCol) {
+                queryText = `SELECT * EXCLUDE (geometry), geometry AS geometry FROM "${tableName}" ORDER BY "${metricCol}" DESC LIMIT 20;`;
+              } else {
+                queryText = `SELECT * EXCLUDE (geometry), geometry AS geometry FROM "${tableName}" LIMIT 50;`;
+              }
+              console.log(`🦆 [MapExecutor] Auto-synthesized fallback query for layer "${tableName}":`, queryText);
+            } else {
+              queryText = "SELECT * FROM map_features LIMIT 50;";
+              console.log(`🦆 [MapExecutor] Auto-synthesized default query for map_features:`, queryText);
+            }
+          }
+
+          // Proactively sanitize ST_AsGeoJSON(geometry) on client map layers where geometry is already GeoJSON VARCHAR
+          if (/\bST_AsGeoJSON\s*\(\s*geometry\s*\)/i.test(queryText)) {
+            queryText = queryText.replace(/\bST_AsGeoJSON\s*\(\s*geometry\s*\)/gi, "geometry");
           }
 
           const { clientDuckDB } =
@@ -597,10 +797,16 @@ export const executeClientCommands = async (
               .syncFromAttachedFiles([cmd.payload.targetPath]);
           }
 
-          const mapFeatures = useMapStore.getState().mapFeatures;
-          await clientDuckDB.syncMapLayers(mapFeatures);
+          await clientDuckDB.syncMapLayers(currentMapFeatures);
 
-          const queryResult = await clientDuckDB.runQuery(queryText);
+          let queryResult: any;
+          try {
+            queryResult = await clientDuckDB.runQuery(queryText);
+          } catch (qErr: any) {
+            console.warn(`[MapExecutor] runQuery failed on "${queryText}", attempting safe fallback:`, qErr);
+            const safeFallback = "SELECT * FROM map_features LIMIT 50;";
+            queryResult = await clientDuckDB.runQuery(safeFallback);
+          }
 
           // Add to chat store so QueryResultsPanel opens with this table
           const { useChatStore } = await import("@/stores/useChatStore");
@@ -663,6 +869,18 @@ export const executeClientCommands = async (
           const currentLayers = store.mapFeatures;
           let layerIndex = cmd.payload?.layerIndex;
           let style = cmd.payload?.style;
+
+          // Smart layer targeting by name or phrase
+          const targetLayerName = (cmd.payload?.layerName || (typeof layerIndex === "string" ? layerIndex : ""))?.toLowerCase().trim();
+          if (targetLayerName && isNaN(Number(targetLayerName)) && currentLayers.length > 0) {
+            const foundIdx = currentLayers.findIndex((l: any, i: number) => {
+              const name = (extractLayerName(l) || l.title || l.name || l.properties?.title || l.properties?.name || `layer_${i + 1}`).toLowerCase();
+              return name.includes(targetLayerName) || targetLayerName.includes(name);
+            });
+            if (foundIdx !== -1) {
+              layerIndex = foundIdx;
+            }
+          }
 
           if (typeof layerIndex === "string") {
             const parsed = parseInt(layerIndex.replace(/\D/g, ""), 10);
@@ -754,6 +972,35 @@ export const executeClientCommands = async (
 
           let finalStyle = { ...style };
 
+          // Early color normalization for deterministic processing
+          if (finalStyle.fillColor) finalStyle.fillColor = parseRGBAColor(finalStyle.fillColor);
+          if (finalStyle.lineColor) finalStyle.lineColor = parseRGBAColor(finalStyle.lineColor);
+          if (finalStyle.minColor) finalStyle.minColor = parseRGBAColor(finalStyle.minColor);
+          if (finalStyle.maxColor) finalStyle.maxColor = parseRGBAColor(finalStyle.maxColor);
+          if (finalStyle.defaultColor) finalStyle.defaultColor = parseRGBAColor(finalStyle.defaultColor);
+          if (finalStyle.mapping && typeof finalStyle.mapping === "object") {
+            const normalizedMapping: Record<string, any> = {};
+            for (const [k, rawVal] of Object.entries(finalStyle.mapping)) {
+              const v = (rawVal && typeof rawVal === "object" ? rawVal : {}) as Record<string, any>;
+              normalizedMapping[k] = {
+                ...v,
+                fillColor: v.fillColor ? parseRGBAColor(v.fillColor) : [59, 130, 246, 200],
+                ...(v.lineColor && { lineColor: parseRGBAColor(v.lineColor) }),
+              };
+            }
+            finalStyle.mapping = normalizedMapping;
+          }
+          if (finalStyle.rules && Array.isArray(finalStyle.rules)) {
+            finalStyle.rules = finalStyle.rules.map((r: any) => ({
+              ...r,
+              ...(r.fillColor && { fillColor: parseRGBAColor(r.fillColor) }),
+              ...(r.lineColor && { lineColor: parseRGBAColor(r.lineColor) }),
+            }));
+          }
+          if (finalStyle.colorRange && Array.isArray(finalStyle.colorRange)) {
+            finalStyle.colorRange = finalStyle.colorRange.map((c: any) => parseRGBAColor(c));
+          }
+
           // Aggregate sample properties across up to 20 features
           let sampleProps: Record<string, any> = {};
           const scanCount = Math.min(features.length, 20);
@@ -829,9 +1076,11 @@ export const executeClientCommands = async (
                 if (!mapping[g]) {
                   const c = activePalette[idx % activePalette.length];
                   mapping[g] = {
-                    fillColor: [c[0], c[1], c[2], c[3]],
+                    fillColor: parseRGBAColor(c),
                     label: g,
                   };
+                } else if (mapping[g].fillColor) {
+                  mapping[g].fillColor = parseRGBAColor(mapping[g].fillColor);
                 }
               });
 
@@ -887,12 +1136,13 @@ export const executeClientCommands = async (
             ) {
               finalStyle.rules.forEach((rule: any, idx: number) => {
                 if (rule.category && !mapping[rule.category]) {
-                  const c =
-                    rule.fillColor || activePalette[idx % activePalette.length];
+                  const rawColor = rule.fillColor || activePalette[idx % activePalette.length];
                   mapping[rule.category] = {
-                    fillColor: [c[0], c[1], c[2], c[3] ?? 200],
+                    fillColor: parseRGBAColor(rawColor),
                     label: rule.label || rule.category,
                   };
+                } else if (rule.category && mapping[rule.category]?.fillColor) {
+                  mapping[rule.category].fillColor = parseRGBAColor(mapping[rule.category].fillColor);
                 }
               });
 
@@ -1004,9 +1254,11 @@ export const executeClientCommands = async (
                 if (r.category && !mapping[r.category]) {
                   const c = activePalette[idx % activePalette.length];
                   mapping[r.category] = {
-                    fillColor: [c[0], c[1], c[2], c[3]],
+                    fillColor: parseRGBAColor(c),
                     label: r.category,
                   };
+                } else if (r.category && mapping[r.category]?.fillColor) {
+                  mapping[r.category].fillColor = parseRGBAColor(mapping[r.category].fillColor);
                 }
               });
 
@@ -1095,7 +1347,7 @@ export const executeClientCommands = async (
                 uniqueVals.forEach((val, idx) => {
                   const c = activePalette[idx % activePalette.length];
                   mapping[val] = {
-                    fillColor: [c[0], c[1], c[2], c[3]],
+                    fillColor: parseRGBAColor(c),
                     label: val,
                   };
                 });
@@ -1153,40 +1405,351 @@ export const executeClientCommands = async (
               ];
           }
 
+          // 4. Color normalization on finalStyle
+          if (finalStyle.fillColor) finalStyle.fillColor = parseRGBAColor(finalStyle.fillColor);
+          if (finalStyle.lineColor) finalStyle.lineColor = parseRGBAColor(finalStyle.lineColor);
+          if (finalStyle.minColor) finalStyle.minColor = parseRGBAColor(finalStyle.minColor);
+          if (finalStyle.maxColor) finalStyle.maxColor = parseRGBAColor(finalStyle.maxColor);
+          if (finalStyle.defaultColor) finalStyle.defaultColor = parseRGBAColor(finalStyle.defaultColor);
+          if (finalStyle.mapping && typeof finalStyle.mapping === "object") {
+            for (const k of Object.keys(finalStyle.mapping)) {
+              if (finalStyle.mapping[k]?.fillColor) {
+                finalStyle.mapping[k].fillColor = parseRGBAColor(finalStyle.mapping[k].fillColor);
+              }
+              if (finalStyle.mapping[k]?.lineColor) {
+                finalStyle.mapping[k].lineColor = parseRGBAColor(finalStyle.mapping[k].lineColor);
+              }
+            }
+          }
+          if (finalStyle.rules && Array.isArray(finalStyle.rules)) {
+            for (const r of finalStyle.rules) {
+              if (r.fillColor) r.fillColor = parseRGBAColor(r.fillColor);
+              if (r.lineColor) r.lineColor = parseRGBAColor(r.lineColor);
+            }
+          }
+
+          // 5. Visualization type switching if requested (HexagonLayer, HeatmapLayer, etc.)
+          const candidateViz = cmd.payload?.visualizationType || style?.visualizationType || style?.type;
+          const vizType = candidateViz === "HeatmapLayer" || candidateViz === "heatmap"
+            ? "HeatmapLayer"
+            : candidateViz === "HexagonLayer" || candidateViz === "hexagon"
+              ? "HexagonLayer"
+              : candidateViz === "ScatterplotLayer" || candidateViz === "scatterplot"
+                ? "ScatterplotLayer"
+                : candidateViz === "GridLayer" || candidateViz === "grid"
+                  ? "GridLayer"
+                  : candidateViz === "GeoJsonLayer" || candidateViz === "geojson"
+                    ? "GeoJsonLayer"
+                    : null;
+
+          if (vizType && ["HexagonLayer", "HeatmapLayer", "ScatterplotLayer", "GridLayer", "GeoJsonLayer"].includes(vizType)) {
+            store.setMapFeatureLayerType(layerIndex, vizType as any);
+            const vizConfig: any = {};
+            const r = cmd.payload?.radius ?? style?.radius;
+            if (r !== undefined) vizConfig.radius = r;
+            const rp = cmd.payload?.radiusPixels ?? style?.radiusPixels;
+            if (rp !== undefined) vizConfig.radiusPixels = rp;
+            const es = cmd.payload?.elevationScale ?? style?.elevationScale;
+            if (es !== undefined) vizConfig.elevationScale = es;
+            const inten = cmd.payload?.intensity ?? style?.intensity;
+            if (inten !== undefined) vizConfig.intensity = inten;
+            const ext = cmd.payload?.extruded ?? style?.extruded;
+            if (ext !== undefined) vizConfig.extruded = ext;
+            const colorRange = cmd.payload?.colorRange || style?.colorRange;
+            if (colorRange && Array.isArray(colorRange)) {
+              vizConfig.colorRange = colorRange.map((c: any) => parseRGBAColor(c));
+            }
+            store.setMapFeatureLayerConfig(layerIndex, vizConfig);
+          }
+
+          // 6. 3D Extrusion auto perspective tilt
+          if (finalStyle.extruded || finalStyle.elevationField) {
+            const currentPitch = store.viewState?.pitch ?? 0;
+            if (currentPitch < 20) {
+              store.setViewState({
+                pitch: 45,
+                transitionDuration: 800,
+              });
+            }
+          }
+
           useMapStore
             .getState()
             .setMapFeatureLayerStyle(layerIndex, finalStyle);
 
+          if (sessionId && !sessionId.startsWith("shared-")) {
+            const updatedLayers = useMapStore.getState().mapFeatures;
+            const updatedLayer = updatedLayers[layerIndex];
+            if (updatedLayer) {
+              const lName = extractLayerName(updatedLayer) || `Layer ${layerIndex + 1}`;
+              saveLayer(sessionId, layerIndex, lName, updatedLayer, true, true).catch((e) =>
+                console.warn("[MapExecutor] Failed to save styled layer to session:", e)
+              );
+            }
+          }
+
           const styleTypeLabel =
-            finalStyle.type === "category"
-              ? `category-based on "${finalStyle.field}"`
-              : finalStyle.type === "gradient"
-                ? `gradient on "${finalStyle.field}"`
-                : "solid color";
+            vizType && vizType !== "GeoJsonLayer"
+              ? `${vizType} visualization`
+              : finalStyle.type === "category"
+                ? `category-based on "${finalStyle.field}"`
+                : finalStyle.type === "gradient"
+                  ? `gradient on "${finalStyle.field}"`
+                  : "solid color";
           results.push({
             success: true,
             code: "SUCCESS",
-            message: `Applied ${styleTypeLabel} styling to layer ${layerIndex}. All features are styled with colors on the map.`,
+            message: `Applied ${styleTypeLabel} styling to layer ${layerIndex}.${finalStyle.extruded || finalStyle.elevationField ? " 3D perspective extrusion enabled." : ""} All features are styled with colors on the map.`,
           });
           break;
         }
         case "CLEAR_LAYER_STYLE": {
+          const store = useMapStore.getState();
+          const currentLayers = store.mapFeatures;
           let layerIndex = cmd.payload?.layerIndex;
+          const targetLayerName = (cmd.payload?.layerName || (typeof layerIndex === "string" ? layerIndex : ""))?.toLowerCase().trim();
+          if (targetLayerName && isNaN(Number(targetLayerName)) && currentLayers.length > 0) {
+            const foundIdx = currentLayers.findIndex((l: any, i: number) => {
+              const name = (extractLayerName(l) || l.title || l.name || l.properties?.title || l.properties?.name || `layer_${i + 1}`).toLowerCase();
+              return name.includes(targetLayerName) || targetLayerName.includes(name);
+            });
+            if (foundIdx !== -1) {
+              layerIndex = foundIdx;
+            }
+          }
           if (typeof layerIndex === "string") {
             const parsed = parseInt(layerIndex.replace(/\D/g, ""), 10);
             layerIndex = isNaN(parsed)
-              ? (useMapStore.getState().selectedLayerIndex ?? 0)
+              ? (store.selectedLayerIndex ?? 0)
               : parsed;
           } else if (typeof layerIndex !== "number") {
-            layerIndex = useMapStore.getState().selectedLayerIndex ?? 0;
+            layerIndex = store.selectedLayerIndex ?? 0;
           }
-          useMapStore.getState().clearMapFeatureLayerStyle(layerIndex);
+          store.clearMapFeatureLayerStyle(layerIndex);
+
+          if (sessionId && !sessionId.startsWith("shared-")) {
+            const updatedLayers = useMapStore.getState().mapFeatures;
+            const updatedLayer = updatedLayers[layerIndex];
+            if (updatedLayer) {
+              const lName = extractLayerName(updatedLayer) || `Layer ${layerIndex + 1}`;
+              saveLayer(sessionId, layerIndex, lName, updatedLayer, true, true).catch((e) =>
+                console.warn("[MapExecutor] Failed to save cleared layer to session:", e)
+              );
+            }
+          }
+
           results.push({
             success: true,
             code: "SUCCESS",
             message: `Cleared styling from layer ${layerIndex}.`,
           });
           break;
+        }
+        case "COMPARE_PINCODES": {
+          const { pinCodeA, pinCodeB, sector = "real_estate", specificAmenities, d0 = 0.5, renderOnMap = true, precomputedLayers } = cmd.payload || {};
+          if (!pinCodeA || !pinCodeB) {
+            throw new Error("Missing pinCodeA or pinCodeB parameters.");
+          }
+          const {
+            fetchOrResolvePinCode,
+            comparePinCodes,
+            generateZipBoundaryGeoJson,
+            generatePinAmenitiesGeoJson,
+            generateComparisonColorLegend,
+            getScoreBasedBoundaryColor,
+            SECTOR_PROFILES,
+          } = await import("@/services/locusScoreService");
+
+          let dataA: any = null;
+          let dataB: any = null;
+          let comparison: any = null;
+          let scoreA = 0;
+          let scoreB = 0;
+          const sectorLabel = (SECTOR_PROFILES as any)[sector]?.name || sector;
+          let newFeatures: any[] = [];
+
+          if (Array.isArray(precomputedLayers) && precomputedLayers.length === 4) {
+            newFeatures = precomputedLayers;
+            const bFeatA = precomputedLayers[0]?.features?.[0];
+            const bFeatB = precomputedLayers[2]?.features?.[0];
+            const coordA = bFeatA?.geometry?.coordinates?.[0]?.[0] || [0, 0];
+            const coordB = bFeatB?.geometry?.coordinates?.[0]?.[0] || [0, 0];
+            scoreA = bFeatA?.properties?.score || 50;
+            scoreB = bFeatB?.properties?.score || 50;
+            dataA = { lng: coordA[0], lat: coordA[1], name: bFeatA?.properties?.area_name || pinCodeA, pinCode: pinCodeA, pois: [] };
+            dataB = { lng: coordB[0], lat: coordB[1], name: bFeatB?.properties?.area_name || pinCodeB, pinCode: pinCodeB, pois: [] };
+          } else {
+            dataA = await fetchOrResolvePinCode(pinCodeA, d0, specificAmenities);
+            dataB = await fetchOrResolvePinCode(pinCodeB, d0, specificAmenities);
+            comparison = comparePinCodes(dataA, dataB, sector as any, d0);
+            scoreA = comparison.overallDelta.scoreA;
+            scoreB = comparison.overallDelta.scoreB;
+
+            // Layer 1: Boundary A (score-colored)
+            newFeatures.push(generateZipBoundaryGeoJson(dataA, scoreA, sectorLabel));
+            // Layer 2: Amenities A (category-colored)
+            newFeatures.push(generatePinAmenitiesGeoJson(dataA, `pinA_${pinCodeA}`));
+            // Layer 3: Boundary B (score-colored)
+            newFeatures.push(generateZipBoundaryGeoJson(dataB, scoreB, sectorLabel));
+            // Layer 4: Amenities B (category-colored)
+            newFeatures.push(generatePinAmenitiesGeoJson(dataB, `pinB_${pinCodeB}`));
+          }
+
+          console.log(`\n================================================================================`);
+          console.log(`🗺️ [STEP 7: CLIENT MAP EXECUTOR] Rendering COMPARE_PINCODES on Deck.gl Map:`);
+          console.log(`   PIN A: ${pinCodeA} vs PIN B: ${pinCodeB}`);
+          console.log(`   Sector: ${sector} | Decay d0: ${d0}`);
+          console.log(`   Precomputed Layers Received: ${Array.isArray(precomputedLayers) ? precomputedLayers.length : 0}`);
+
+          if (renderOnMap !== false) {
+            // Remove ANY existing Locus comparison layers (boundaries, buffers, amenities) to prevent duplicate layers
+            const existing = useMapStore
+              .getState()
+              .mapFeatures.filter(
+                (f: any) =>
+                  !f?.properties?.isLocusLayer &&
+                  !f?.properties?.isLocusBuffer &&
+                  !f?.properties?.isLocusBoundary &&
+                  !f?.properties?.isLocusAmenities &&
+                  !(typeof f?.properties?.name === "string" && (f.properties.name.startsWith("Boundary:") || f.properties.name.startsWith("Amenities:")))
+              );
+            useMapStore.getState().setMapFeatures([...existing, ...newFeatures]);
+
+            console.log(`   🎨 Mounted ${newFeatures.length} Comparison Layers on MapStore:`);
+            newFeatures.forEach((feat, fIdx) => {
+              const isBoundary = feat.properties?.isLocusBoundary;
+              const fCount = Array.isArray(feat.features) ? feat.features.length : 1;
+              const fTitle = feat.properties?.name || `Layer ${fIdx + 1}`;
+              console.log(`      • Layer ${fIdx + 1}: [${isBoundary ? 'Boundary Polygon' : 'Amenity POI Dots'}] - ${fCount} feature(s) - "${fTitle}"`);
+            });
+
+            if (sessionId) {
+              newFeatures.forEach((feat, fIdx) => {
+                const fLabel = feat.properties?.name || `Locus Compare Layer ${fIdx + 1}`;
+                saveLayer(sessionId, existing.length + fIdx, fLabel, feat).catch(console.error);
+              });
+            }
+
+            if (dataA.lng && dataB.lng && dataA.lat && dataB.lat) {
+              const minLng = Math.min(dataA.lng, dataB.lng);
+              const maxLng = Math.max(dataA.lng, dataB.lng);
+              const minLat = Math.min(dataA.lat, dataB.lat);
+              const maxLat = Math.max(dataA.lat, dataB.lat);
+              const centerLng = (minLng + maxLng) / 2;
+              const centerLat = (minLat + maxLat) / 2;
+
+              const distKm = Math.hypot((dataA.lng - dataB.lng) * 108, (dataA.lat - dataB.lat) * 111);
+              let zoomLevel = 13;
+              if (distKm > 50) zoomLevel = 8;
+              else if (distKm > 20) zoomLevel = 10;
+              else if (distKm > 10) zoomLevel = 11;
+              else if (distKm > 4) zoomLevel = 12;
+
+              useMapStore.getState().setViewState({
+                longitude: centerLng,
+                latitude: centerLat,
+                zoom: zoomLevel,
+                transitionDuration: 1200,
+              });
+              console.log(`   🎯 Camera animated to center [Lat ${centerLat.toFixed(5)}, Lng ${centerLng.toFixed(5)}] at Zoom ${zoomLevel} (Span: ${distKm.toFixed(1)} km)`);
+            }
+          }
+          console.log(`================================================================================\n`);
+
+          // Generate color legend for user explanation
+          const colorLegend = generateComparisonColorLegend(dataA, dataB, scoreA, scoreB, sector);
+          const colorA = getScoreBasedBoundaryColor(scoreA);
+          const colorB = getScoreBasedBoundaryColor(scoreB);
+
+          results.push({
+            success: true,
+            code: "SUCCESS",
+            message: `Compared PIN codes ${pinCodeA} (${dataA.name}) and ${pinCodeB} (${dataB.name}) for ${sectorLabel}. Scores: ${scoreA} vs ${scoreB}. 4 layers rendered: 2 boundaries (score-colored) + 2 amenity layers (category-colored).`,
+            data: {
+              ...(comparison || {}),
+              colorLegend,
+              layerStructure: {
+                layer1: `Boundary: ${pinCodeA} (${dataA.name}) — ${colorA.label}`,
+                layer2: `Amenities: ${pinCodeA} (${dataA.name}) — ${dataA.pois?.length || 0} POIs, category-colored`,
+                layer3: `Boundary: ${pinCodeB} (${dataB.name}) — ${colorB.label}`,
+                layer4: `Amenities: ${pinCodeB} (${dataB.name}) — ${dataB.pois?.length || 0} POIs, category-colored`,
+              },
+            },
+          });
+          break;
+        }
+        case "SCORE_PINCODE": {
+          const { pinCode, sector = "real_estate", specificAmenities, d0 = 0.5, renderOnMap = true, precomputedLayers } = cmd.payload || {};
+          if (!pinCode) throw new Error("Missing pinCode parameter.");
+          const {
+            fetchOrResolvePinCode,
+            generateCategoryPOIGeoJson,
+            generatePinBufferGeoJson,
+            ALL_CATEGORY_IDS,
+          } = await import("@/services/locusScoreService");
+
+          let data: any = null;
+          let newFeatures: any[] = [];
+          if (Array.isArray(precomputedLayers) && precomputedLayers.length > 0) {
+            newFeatures = precomputedLayers;
+            const feat0 = precomputedLayers[0]?.features?.[0];
+            const coord = feat0?.geometry?.coordinates?.[0]?.[0] || feat0?.geometry?.coordinates || [0, 0];
+            data = {
+              lat: Array.isArray(coord) ? coord[1] : 0,
+              lng: Array.isArray(coord) ? coord[0] : 0,
+              name: feat0?.properties?.name || pinCode,
+              sectorScores: { [sector]: feat0?.properties?.score || 50 },
+            };
+          } else {
+            data = await fetchOrResolvePinCode(pinCode, d0, specificAmenities);
+            newFeatures = [generatePinBufferGeoJson(data, 1.0)];
+            const targetCats =
+              Array.isArray(specificAmenities) && specificAmenities.length > 0
+                ? Array.from(new Set(data.pois.map((p: any) => p.category)))
+                : ALL_CATEGORY_IDS;
+            for (const catId of targetCats) {
+              newFeatures.push(generateCategoryPOIGeoJson(data, catId as any));
+            }
+          }
+
+          if (renderOnMap !== false) {
+            const existing = useMapStore
+              .getState()
+              .mapFeatures.filter(
+                (f: any) =>
+                  !f?.properties?.isLocusLayer &&
+                  !f?.properties?.isLocusBuffer &&
+                  !f?.properties?.isLocusBoundary &&
+                  !f?.properties?.isLocusAmenities &&
+                  !(typeof f?.properties?.name === "string" && (f.properties.name.startsWith("Boundary:") || f.properties.name.startsWith("Amenities:")))
+              );
+            useMapStore.getState().setMapFeatures([...existing, ...newFeatures]);
+
+            if (sessionId) {
+              newFeatures.forEach((feat, fIdx) => {
+                const fLabel = feat.properties?.name || `Locus PIN ${pinCode} Layer ${fIdx + 1}`;
+                saveLayer(sessionId, existing.length + fIdx, fLabel, feat).catch(console.error);
+              });
+            }
+
+            if (data.lng && data.lat) {
+              useMapStore.getState().setViewState({
+                longitude: data.lng,
+                latitude: data.lat,
+                zoom: 14,
+                transitionDuration: 1000,
+              });
+            }
+          }
+
+            const sKey = (sector || "real_estate") as keyof typeof data.sectorScores;
+            results.push({
+              success: true,
+              code: "SUCCESS",
+              message: `Scored PIN code ${pinCode} (${data.name}): LocusScore = ${data.sectorScores[sKey]}.`,
+              data,
+            });
+            break;
         }
         default:
           throw new Error(`Unknown command type: ${cmd.type}`);

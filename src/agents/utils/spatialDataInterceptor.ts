@@ -26,6 +26,8 @@ export interface InterceptedSpatialData {
     distanceKm?: string;
     durationMin?: string;
     summary?: string;
+    centroid?: [number, number];
+    boundingRadiusMeters?: number;
   };
 }
 
@@ -46,6 +48,25 @@ export function createLightweightSummary(
   rawResponse?: any,
 ): string {
   const fc = metadata.featureCount;
+
+  // Zipcode / District boundary response
+  if (toolName === "get_zip_data" || toolName === "get_district_data") {
+    const info = Array.isArray(rawResponse) ? rawResponse[0] : rawResponse;
+    const name = info?.officeName || info?.dtname || info?.name || "Region Boundary";
+    const zip = info?.zipcode || metadata?.summary || "";
+    const coordsStr = metadata?.centroid
+      ? ` Centroid: latitude ${metadata.centroid[1].toFixed(5)}, longitude ${metadata.centroid[0].toFixed(5)}.`
+      : "";
+    const radiusStr = metadata?.boundingRadiusMeters
+      ? ` Search radius covering polygon: ${metadata.boundingRadiusMeters}m.`
+      : "";
+
+    return (
+      `✅ Boundary polygon loaded for ${name}${zip ? ` (${zip})` : ""}.${coordsStr}${radiusStr} ` +
+      `Boundary is displayed on the map. To query amenities (run_osm_query), use these exact centroid coordinates and radius ` +
+      `so all amenities inside this boundary are fetched and automatically clipped.`
+    );
+  }
 
   // Directions / route response
   if (rawResponse?.routes && rawResponse.routes.length > 0) {

@@ -146,6 +146,8 @@ export const MapWorkspace = () => {
   const mapFeatureLayerStyles = useMapStore(state => state.mapFeatureLayerStyles);
   const activeStylePanelLayerIndex = useMapStore(state => state.activeStylePanelLayerIndex);
   const setActiveStylePanelLayerIndex = useMapStore(state => state.setActiveStylePanelLayerIndex);
+  const reorderLayers = useMapStore(state => state.reorderLayers);
+  const removeLayer = useMapStore(state => state.removeLayer);
 
   const getStableCamera = () => {
     const { longitude, latitude, zoom, pitch, bearing } = useMapStore.getState().viewState;
@@ -314,32 +316,21 @@ export const MapWorkspace = () => {
 
     if (draggedIdx !== null && dragOverIdx !== null && draggedIdx !== dragOverIdx) {
       const stableCamera = getStableCamera();
-      const updated = [...mapFeatures];
-      const [draggedItem] = updated.splice(draggedIdx, 1);
-      updated.splice(dragOverIdx, 0, draggedItem);
-      setMapFeatures(updated);
+      
+      // Reorder layers and all associated styles, types, and configs atomically
+      reorderLayers(draggedIdx, dragOverIdx);
+
       setViewState(stableCamera);
       window.requestAnimationFrame(() => setViewState(stableCamera));
+      setLayerTypeSwitcherIdx(null);
 
-      if (selectedLayerIndex !== null) {
-        if (selectedLayerIndex === draggedIdx) {
-          setSelectedLayerIndex(dragOverIdx);
-        } else if (draggedIdx < dragOverIdx && selectedLayerIndex > draggedIdx && selectedLayerIndex <= dragOverIdx) {
-          setSelectedLayerIndex(selectedLayerIndex - 1);
-        } else if (draggedIdx > dragOverIdx && selectedLayerIndex >= dragOverIdx && selectedLayerIndex < draggedIdx) {
-          setSelectedLayerIndex(selectedLayerIndex + 1);
-        }
+      // Persist the newly ordered layers to Supabase for the active session
+      if (activeSessionId && !activeSessionId.startsWith("shared-")) {
+        const reorderedFeatures = useMapStore.getState().mapFeatures;
+        syncAllLayers(activeSessionId, reorderedFeatures).catch((err) =>
+          console.error("[MapWorkspace] Failed to sync reordered layers to Supabase:", err)
+        );
       }
-
-      // Remap hiddenLayerIndexes so visibility persists on reordering
-      setHiddenLayerIndexes((prev) =>
-        prev.map((i) => {
-          if (i === draggedIdx) return dragOverIdx;
-          if (draggedIdx < dragOverIdx && i > draggedIdx && i <= dragOverIdx) return i - 1;
-          if (draggedIdx > dragOverIdx && i >= dragOverIdx && i < draggedIdx) return i + 1;
-          return i;
-        })
-      );
     }
 
     if (draggedIdx !== null) {
@@ -611,7 +602,7 @@ export const MapWorkspace = () => {
                       
                       return (
                         <div 
-                          key={idx} 
+                          key={(featureObj as any)?._layerId || `layer-${idx}`} 
                           draggable
                           onDragStart={() => handleDragStart(idx)}
                           onDragEnter={() => handleDragEnter(idx)}
@@ -742,11 +733,11 @@ export const MapWorkspace = () => {
                               className={`transition-all p-1 rounded mr-0.5 shrink-0 ${
                                 activeStylePanelLayerIndex === idx
                                   ? '!opacity-100 text-violet-500 bg-violet-500/15'
-                                  : mapFeatureLayerStyles[idx]
+                                  : (mapFeatureLayerStyles[idx] || (featureObj as any)?._layerStyle)
                                   ? 'text-violet-400 opacity-90 hover:text-violet-500 hover:bg-violet-500/10'
                                   : 'text-muted-foreground opacity-60 group-hover:opacity-100 hover:text-foreground hover:bg-muted'
                               }`}
-                              title={mapFeatureLayerStyles[idx] ? "Edit Layer Style" : "Style Layer"}
+                              title={(mapFeatureLayerStyles[idx] || (featureObj as any)?._layerStyle) ? "Edit Layer Style" : "Style Layer"}
                             >
                               <Paintbrush className="w-3.5 h-3.5" />
                             </button>
@@ -773,17 +764,7 @@ export const MapWorkspace = () => {
                                   import("sonner").then(({ toast }) => toast.error("You are not allowed to do that. Shared sessions are read-only."));
                                   return;
                                 }
-                                const updated = [...mapFeatures];
-                                updated.splice(idx, 1);
-                                setMapFeatures(updated);
-                                setHiddenLayerIndexes((prev) =>
-                                  prev.filter((i) => i !== idx).map((i) => (i > idx ? i - 1 : i))
-                                );
-                                if (selectedLayerIndex === idx) {
-                                  setSelectedLayerIndex(null);
-                                } else if (selectedLayerIndex !== null && selectedLayerIndex > idx) {
-                                  setSelectedLayerIndex(selectedLayerIndex - 1);
-                                }
+                                removeLayer(idx);
                                 if (activeSessionId) {
                                   deleteLayerFromSupabase(activeSessionId, idx).catch((e) =>
                                     console.error("[MapWorkspace] Failed to delete layer from Supabase:", e)

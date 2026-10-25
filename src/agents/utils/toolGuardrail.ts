@@ -126,6 +126,93 @@ export const toolGuardrailCallback = async (params: {
     }
   }
 
+  // 1d. OSM Amenities & Radius Normalizer: Intercept run_osm_query to ensure canonical OSM key=value tags
+  if (toolName === "run_osm_query") {
+    if (params.args && Array.isArray(params.args.amenities)) {
+      params.args.amenities = params.args.amenities.flatMap((amen: any) => {
+        if (typeof amen !== "string") return [amen];
+        const lower = amen.toLowerCase().trim();
+        if (lower.includes("=")) return [lower];
+        if (lower.includes("hospital") || lower.includes("medic")) return ["amenity=hospital"];
+        if (lower.includes("school")) return ["amenity=school"];
+        if (lower.includes("college") || lower.includes("univ")) return ["amenity=college"];
+        if (lower.includes("clinic")) return ["amenity=clinic"];
+        if (lower.includes("pharmacy") || lower.includes("chemist")) return ["amenity=pharmacy"];
+        if (lower.includes("bank")) return ["amenity=bank"];
+        if (lower.includes("atm")) return ["amenity=atm"];
+        if (lower.includes("restaurant") || lower.includes("food")) return ["amenity=restaurant"];
+        if (lower.includes("cafe")) return ["amenity=cafe"];
+        if (lower.includes("supermarket") || lower.includes("grocery") || lower.includes("kirana")) return ["shop=supermarket"];
+        if (lower.includes("park") || lower.includes("garden")) return ["leisure=park"];
+        if (lower.includes("bus")) return ["highway=bus_stop"];
+        return [`amenity=${lower}`];
+      });
+      console.log(`🔧 [Guardrail] Normalized run_osm_query amenities to:`, params.args.amenities);
+    }
+
+    // Ensure search parameters cover the full area/zipcode polygon
+    if (params.args) {
+      if (!params.args.parameters || typeof params.args.parameters !== "object") {
+        params.args.parameters = {};
+      }
+      const p = params.args.parameters as Record<string, any>;
+      
+      try {
+        const { getActiveBoundary, formatBoundaryPolyString, OSM_POLYGON_QUERY_ID } = await import("./boundaryClipper");
+
+        let pinHint: string | undefined;
+        const argsStr = JSON.stringify(params.args || {});
+        const pinMatch = argsStr.match(/\b[1-9][0-9]{5}\b/);
+        if (pinMatch) pinHint = pinMatch[0];
+
+        if (!pinHint && params.context) {
+          try {
+            const ctxStr = JSON.stringify(params.context);
+            const m = ctxStr.match(/\b[1-9][0-9]{5}\b/);
+            if (m) pinHint = m[0];
+          } catch {}
+        }
+
+        const activeBoundary = await getActiveBoundary(pinHint);
+        if (activeBoundary) {
+          // 1. Format boundary polygon coordinates into Overpass poly string
+          const polyStr = formatBoundaryPolyString(activeBoundary);
+          if (polyStr) {
+            p.poly = polyStr;
+            params.args.queryId = OSM_POLYGON_QUERY_ID;
+            console.log(
+              `🔧 [Guardrail] Injected poly parameter for Polygon Search (${OSM_POLYGON_QUERY_ID}) with ${polyStr.split(" ").length / 2} vertices.`
+            );
+          }
+
+          // 2. Also inject centroid and bounding radius as fallback
+          if (!p.latitude || !p.longitude) {
+            p.latitude = activeBoundary.centroid[1];
+            p.longitude = activeBoundary.centroid[0];
+            console.log(`🔧 [Guardrail] Injected exact boundary centroid [${p.latitude}, ${p.longitude}] into run_osm_query.`);
+          }
+          const minNeededRadius = activeBoundary.boundingRadiusMeters;
+          const currentRadius = Number(p.radius) || 1000;
+          if (currentRadius < minNeededRadius) {
+            p.radius = minNeededRadius;
+            console.log(`🔧 [Guardrail] Expanded run_osm_query radius from ${currentRadius}m to ${minNeededRadius}m to cover full boundary.`);
+          }
+        } else {
+          const currentRadius = Number(p.radius) || 1000;
+          if (currentRadius < 3500) {
+            p.radius = 3500;
+            console.log(`🔧 [Guardrail] Expanded run_osm_query radius from ${currentRadius}m to 3500m for full coverage.`);
+          }
+        }
+      } catch (boundaryErr) {
+        const currentRadius = Number(p.radius) || 1000;
+        if (currentRadius < 3500) {
+          p.radius = 3500;
+        }
+      }
+    }
+  }
+
   if (!toolName || !GUARDED_TOOLS.has(toolName)) {
     return undefined; // Not guarded — allow execution
   }

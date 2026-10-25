@@ -277,26 +277,189 @@ export function hashStringToColor(
   return palette[idx];
 }
 
+/** Named standard CSS and vibrant UI colors */
+const NAMED_COLORS: Record<string, [number, number, number]> = {
+  red: [239, 68, 68],
+  crimson: [220, 38, 38],
+  ruby: [225, 29, 72],
+  rose: [244, 63, 94],
+  pink: [236, 72, 153],
+  magenta: [217, 70, 239],
+  fuchsia: [217, 70, 239],
+  purple: [168, 85, 247],
+  violet: [139, 92, 246],
+  indigo: [99, 102, 241],
+  blue: [59, 130, 246],
+  navy: [30, 58, 138],
+  darkblue: [30, 58, 138],
+  royalblue: [37, 99, 235],
+  sky: [14, 165, 233],
+  cyan: [6, 182, 212],
+  teal: [20, 184, 166],
+  turquoise: [20, 184, 166],
+  emerald: [16, 185, 129],
+  green: [34, 197, 94],
+  forestgreen: [22, 101, 52],
+  darkgreen: [20, 83, 45],
+  lime: [132, 204, 22],
+  yellow: [234, 179, 8],
+  gold: [245, 158, 11],
+  amber: [245, 158, 11],
+  orange: [249, 115, 22],
+  coral: [251, 113, 133],
+  brown: [180, 83, 9],
+  maroon: [159, 18, 57],
+  olive: [101, 116, 32],
+  white: [255, 255, 255],
+  black: [0, 0, 0],
+  gray: [107, 114, 128],
+  grey: [107, 114, 128],
+  silver: [148, 163, 184],
+  slate: [100, 116, 139],
+  zinc: [113, 113, 122],
+};
+
 /**
- * Interpolate RGBA color smoothly between min and max.
+ * Universal color parser: converts hex, named colors, RGB, RGBA tuples, or objects into [R, G, B, A] tuple.
+ */
+export function parseRGBAColor(color: any, defaultAlpha = 200): RGBAColor {
+  if (!color) return [59, 130, 246, defaultAlpha];
+
+  // 1. Array format [r, g, b] or [r, g, b, a]
+  if (Array.isArray(color)) {
+    if (color.length > 0 && typeof color[0] === "string" && (color[0].startsWith("#") || isNaN(Number(color[0])))) {
+      const joined = color.join("");
+      return parseRGBAColor(joined, defaultAlpha);
+    }
+    const r = Math.min(255, Math.max(0, Math.round(Number(color[0]) || 0)));
+    const g = Math.min(255, Math.max(0, Math.round(Number(color[1]) || 0)));
+    const b = Math.min(255, Math.max(0, Math.round(Number(color[2]) || 0)));
+    let a = defaultAlpha;
+    if (color.length >= 4 && color[3] !== undefined && color[3] !== null) {
+      const rawA = Number(color[3]);
+      a = rawA <= 1 && rawA > 0 ? Math.round(rawA * 255) : Math.min(255, Math.max(0, Math.round(rawA)));
+    }
+    return [r, g, b, a];
+  }
+
+  // 2. Object format { r, g, b, a? }
+  if (typeof color === "object" && color.r !== undefined && color.g !== undefined && color.b !== undefined) {
+    const r = Math.min(255, Math.max(0, Math.round(Number(color.r) || 0)));
+    const g = Math.min(255, Math.max(0, Math.round(Number(color.g) || 0)));
+    const b = Math.min(255, Math.max(0, Math.round(Number(color.b) || 0)));
+    let a = defaultAlpha;
+    if (color.a !== undefined) {
+      const rawA = Number(color.a);
+      a = rawA <= 1 && rawA > 0 ? Math.round(rawA * 255) : Math.min(255, Math.max(0, Math.round(rawA)));
+    }
+    return [r, g, b, a];
+  }
+
+  // 3. String format
+  if (typeof color === "string") {
+    const str = color.trim().toLowerCase();
+
+    // Hex format #RGB, #RGBA, #RRGGBB, #RRGGBBAA
+    if (str.startsWith("#")) {
+      const hex = str.slice(1);
+      if (hex.length === 3 || hex.length === 4) {
+        const r = parseInt(hex[0] + hex[0], 16);
+        const g = parseInt(hex[1] + hex[1], 16);
+        const b = parseInt(hex[2] + hex[2], 16);
+        const a = hex.length === 4 ? parseInt(hex[3] + hex[3], 16) : defaultAlpha;
+        return [r, g, b, a];
+      }
+      if (hex.length === 6 || hex.length === 8) {
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) : defaultAlpha;
+        return [r, g, b, a];
+      }
+    }
+
+    // rgb(r, g, b) or rgba(r, g, b, a)
+    const rgbaMatch = str.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*([\d.]+))?\s*\)/);
+    if (rgbaMatch) {
+      const r = parseInt(rgbaMatch[1], 10);
+      const g = parseInt(rgbaMatch[2], 10);
+      const b = parseInt(rgbaMatch[3], 10);
+      let a = defaultAlpha;
+      if (rgbaMatch[4] !== undefined) {
+        const rawA = parseFloat(rgbaMatch[4]);
+        a = rawA <= 1 ? Math.round(rawA * 255) : Math.min(255, Math.round(rawA));
+      }
+      return [r, g, b, a];
+    }
+
+    if (NAMED_COLORS[str]) {
+      const [r, g, b] = NAMED_COLORS[str];
+      return [r, g, b, defaultAlpha];
+    }
+  }
+
+  return [59, 130, 246, defaultAlpha];
+}
+
+/**
+ * Multi-stop gradient interpolation across N color stops.
+ */
+export function interpolateMultiStopGradient(
+  val: number,
+  min: number,
+  max: number,
+  stops: any[],
+): RGBAColor {
+  if (!stops || stops.length === 0) return [59, 130, 246, 200];
+  if (stops.length === 1) return parseRGBAColor(stops[0]);
+
+  const parsedStops = stops.map((s) => parseRGBAColor(s));
+  if (isNaN(val)) return parsedStops[0];
+  const range = max - min;
+  if (range <= 0) return parsedStops[0];
+
+  const t = Math.max(0, Math.min(1, (val - min) / range));
+  const segments = parsedStops.length - 1;
+  const segmentIdx = Math.min(segments - 1, Math.floor(t * segments));
+  const segmentT = (t - segmentIdx / segments) * segments;
+
+  const c1 = parsedStops[segmentIdx];
+  const c2 = parsedStops[segmentIdx + 1];
+
+  return [
+    Math.round(c1[0] + segmentT * (c2[0] - c1[0])),
+    Math.round(c1[1] + segmentT * (c2[1] - c1[1])),
+    Math.round(c1[2] + segmentT * (c2[2] - c1[2])),
+    Math.round(c1[3] + segmentT * (c2[3] - c1[3])),
+  ];
+}
+
+/**
+ * Interpolate RGBA color smoothly between min and max (supports 2-color or multi-stop gradient).
  */
 export function interpolateGradient(
   val: number,
   min: number,
   max: number,
-  minColor: RGBAColor,
-  maxColor: RGBAColor,
+  minColor: any,
+  maxColor: any,
+  multiStops?: any[],
 ): RGBAColor {
-  if (isNaN(val)) return minColor;
+  if (multiStops && multiStops.length >= 2) {
+    return interpolateMultiStopGradient(val, min, max, multiStops);
+  }
+  const c1 = parseRGBAColor(minColor);
+  const c2 = parseRGBAColor(maxColor);
+  if (isNaN(val)) return c1;
   const range = max - min;
-  if (range <= 0) return minColor;
+  if (range <= 0) return c1;
   const t = (val - min) / range;
   const clampedT = t < 0 ? 0 : t > 1 ? 1 : t;
 
   return [
-    Math.round(minColor[0] + clampedT * (maxColor[0] - minColor[0])),
-    Math.round(minColor[1] + clampedT * (maxColor[1] - minColor[1])),
-    Math.round(minColor[2] + clampedT * (maxColor[2] - minColor[2])),
-    Math.round(minColor[3] + clampedT * (maxColor[3] - minColor[3])),
+    Math.round(c1[0] + clampedT * (c2[0] - c1[0])),
+    Math.round(c1[1] + clampedT * (c2[1] - c1[1])),
+    Math.round(c1[2] + clampedT * (c2[2] - c1[2])),
+    Math.round(c1[3] + clampedT * (c2[3] - c1[3])),
   ];
 }

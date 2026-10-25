@@ -391,6 +391,7 @@ export const MapSQLChat = () => {
           `3. For analytical / SQL questions: You MUST use 'run_client_duckdb_query' to execute SQL. DO NOT call backend run_duck_db_queries.\n` +
           `4. NEVER claim the table does not exist. The table is right here in DuckDB-Wasm.\n` +
           `5. The spatial geometry is stored as a GeoJSON string in the 'geometry' column.\n` +
+          `   - It is ALREADY GeoJSON (VARCHAR). DO NOT call ST_AsGeoJSON(geometry) — simply select geometry or use SELECT *.\n` +
           `   - To use spatial functions (e.g. ST_Intersection), you MUST use: ST_GeomFromGeoJSON(geometry)\n` +
           `   - We also provide PRE-COMPUTED columns:\n` +
           `     * center_lat, center_lng, lat, lng, centroid (WKT 'POINT(lng lat)')\n` +

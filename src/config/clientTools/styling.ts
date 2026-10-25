@@ -16,16 +16,29 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
     type: "function",
     name: "map_style_layer",
     description:
-      "Apply data-driven, rule-based, or query-based visual styling to a map layer. Fully flexible for ANY user intent:\n" +
-      "1. 'category' — Color features by categorical values, value groups, or custom rules:\n" +
-      "   • Direct field: { type: 'category', field: 'status' } (auto-discovers unique categories if mapping omitted).\n" +
-      "   • VALUE GROUPS (for queries like 'South aur North ke hisab se color karo'): { type: 'category', field: 'region', valueGroups: { 'South': ['Tamil Nadu', 'Kerala', 'Karnataka', 'Andhra Pradesh', 'Telangana'], 'North': ['Delhi', 'Punjab', 'Haryana', 'Uttar Pradesh', 'Himachal Pradesh', 'Rajasthan'] }, mapping: { 'South': { fillColor: [59,130,246,200] }, 'North': { fillColor: [239,68,68,200] } } }. The engine maps each state/value to its group and injects the category into features!\n" +
-      "   • RULES: { type: 'category', rules: [ { category: 'South', field: 'st_nm', operator: 'in', value: ['Tamil Nadu', 'Kerala'] }, { category: 'North', field: 'st_nm', operator: 'in', value: ['Delhi', 'UP'] } ] } or with numeric/coordinate conditions [ { condition: 'lat < 20', category: 'South' } ].\n" +
-      "   • FILTER + COLOR: Set dimUnmatched: true to dim unmatched features to faint gray, or hideUnmatched: true to hide them completely!\n" +
-      "   • RANGES: Continuous numeric classification (e.g. speed thresholds into Best/Average/Poor).\n" +
-      "2. 'gradient' — Interpolate color across a numeric range (e.g., population: low→blue, high→red).\n" +
-      "3. 'solid' — Apply a single flat color to the entire layer.\n\n" +
-      "IMPORTANT: Colors must be RGBA arrays [R, G, B, A] with values 0-255.",
+      "Apply custom, data-driven, 3D, or rule-based visual styling to a map layer with 100% deterministic output.\n" +
+      "DETERMINISM MANDATE: The layer type and colors you pass here will appear on the map, and MUST be the EXACT ones you describe in chat. Never guess or let colors be random.\n\n" +
+      "1. LAYER TYPES (visualizationType):\n" +
+      "   • 'GeoJsonLayer' — Standard vector boundaries, polygons, lines, or points. Supports 3D extrusion (extruded: true) and outlines (filled: false).\n" +
+      "   • 'HeatmapLayer' — Smooth density heat surface for dense points.\n" +
+      "   • 'HexagonLayer' — 3D hexagonal bins with dynamic height.\n" +
+      "   • 'ScatterplotLayer' — High-performance circle points with custom radius.\n" +
+      "   • 'GridLayer' — 3D rectangular grid cell aggregation.\n\n" +
+      "2. DETERMINISTIC COLOR OPTIONS (Available Hex & Names):\n" +
+      "   • Red: '#ef4444' | Crimson: '#dc2626' | Ruby: '#e11d48' | Rose: '#f43f5e'\n" +
+      "   • Blue: '#3b82f6' | Royal: '#2563eb' | Navy: '#1e3a8a' | Sky: '#0ea5e9'\n" +
+      "   • Green: '#22c55e' | Emerald: '#10b981' | Forest: '#166534' | Lime: '#84cc16'\n" +
+      "   • Yellow: '#eab308' | Gold: '#f59e0b'\n" +
+      "   • Orange: '#f97316' | Amber: '#d97706'\n" +
+      "   • Purple: '#a855f7' | Violet: '#8b5cf6' | Indigo: '#6366f1'\n" +
+      "   • Cyan: '#06b6d4' | Teal: '#14b8a6' | Turquoise: '#2dd4bf'\n" +
+      "   • Pink: '#ec4899' | Magenta: '#d946ef'\n" +
+      "   • Neutral: Slate '#64748b' | Dark '#1e293b' | White '#ffffff'\n\n" +
+      "3. STYLING MODES:\n" +
+      "   • 'category' — Explicit category mapping: mapping: { 'High': { fillColor: '#ef4444' }, 'Low': { fillColor: '#22c55e' } }. Or valueGroups: { 'South': [...], 'North': [...] } with matching mapping.\n" +
+      "   • 'gradient' — Smooth numeric ramp: field: 'pop', minColor: '#3b82f6', maxColor: '#ef4444' (or multi-stop colorRange).\n" +
+      "   • 'solid' — Flat color or boundary outline: fillColor: '#3b82f6' (or filled: false, stroked: true, lineColor: 'gold', lineWidth: 3).\n" +
+      "   • 3D EXTRUSION — extruded: true, elevationField: 'pop', elevationScale: 0.5 (auto-tilts camera to 3D perspective).",
     parameters: {
       type: "object",
       properties: {
@@ -34,40 +47,51 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
           description:
             "Zero-based index of the map layer to apply styling to. Use 0 for the most recently added layer if unsure.",
         },
+        layerName: {
+          type: "string",
+          description:
+            "Optional layer name or keyword to target (e.g. 'tracts', 'population', 'delhi'). If provided, automatically finds the matching layer.",
+        },
         style: {
           type: "object",
           description:
-            "The style specification object. Must include a 'type' field ('category', 'gradient', or 'solid').",
+            "The style specification object. Includes 'type' ('category', 'gradient', or 'solid') plus styling properties.",
           properties: {
             type: {
               type: "string",
-              description: "Style type: 'category', 'gradient', or 'solid'.",
-              enum: ["category", "gradient", "solid"],
+              description: "Style type: 'category', 'gradient', 'solid', 'heatmap', or 'hexagon'.",
+              enum: ["category", "gradient", "solid", "heatmap", "hexagon"],
+            },
+            visualizationType: {
+              type: "string",
+              description:
+                "Optional Deck.gl layer type switch: 'GeoJsonLayer', 'HexagonLayer', 'HeatmapLayer', 'ScatterplotLayer', or 'GridLayer'.",
+              enum: ["GeoJsonLayer", "HexagonLayer", "HeatmapLayer", "ScatterplotLayer", "GridLayer"],
             },
             field: {
               type: "string",
               description:
-                "The feature property field name to use for styling. Required for 'gradient', optional if 'rules' or 'valueGroups' are provided.",
+                "The feature property field name to use for styling (e.g. 'population', 'state', 'density').",
             },
             targetField: {
               type: "string",
               description:
-                "Optional target property name to tag on features when assigning derived categories (e.g. 'region'). Defaults to field.",
+                "Optional target property name to tag on features when assigning derived categories.",
             },
             sourceField: {
               type: "string",
               description:
-                "For 'category' type with numeric ranges or valueGroups: the source property column when field is a target category name like 'region' or 'speed_grade'.",
+                "For 'category' with valueGroups: source property column if field is a target category name.",
             },
             valueGroups: {
               type: "object",
               description:
-                "Group multiple property values into named categories. E.g. { 'South': ['Tamil Nadu', 'Kerala', 'Karnataka', 'Andhra Pradesh', 'Telangana'], 'North': ['Delhi', 'Punjab', 'Haryana', 'Uttar Pradesh'] }. Features matching these values are classified into the category.",
+                "Group multiple property values into named categories. E.g. { 'South': ['Tamil Nadu', 'Kerala'], 'North': ['Delhi', 'UP'] }.",
             },
             rules: {
               type: "array",
               description:
-                "Condition-based rules for styling/filtering. Each rule has 'category' (string), optional 'field', 'operator' ('in'|'equals'|'contains'|'>'|'<'|'>='|'<='|'between'), 'value', optional 'condition' string (e.g. 'lat < 20'), 'fillColor', and 'label'.",
+                "Condition-based rules for styling/filtering. Each rule has 'category', optional 'field', 'operator', 'value', 'fillColor', 'lineColor', and 'label'.",
               items: {
                 type: "object",
                 properties: {
@@ -76,18 +100,22 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
                   operator: { type: "string" },
                   value: {
                     type: "string",
-                    description:
-                      "Target value, number, or comma-separated list of values (e.g. 'Tamil Nadu, Kerala' or '25000').",
+                    description: "Target value, number, or comma-separated list of values.",
                   },
                   values: {
                     type: "array",
-                    description:
-                      "Optional array of string values for 'in' operator (e.g. ['Tamil Nadu', 'Kerala']).",
+                    description: "Optional array of string values for 'in' operator.",
                     items: { type: "string" },
                   },
                   condition: { type: "string" },
-                  fillColor: { type: "array", items: { type: "number" } },
-                  lineColor: { type: "array", items: { type: "number" } },
+                  fillColor: {
+                    type: "string",
+                    description: "Fill color: hex code ('#ef4444'), CSS color ('crimson'), or RGBA array.",
+                  },
+                  lineColor: {
+                    type: "string",
+                    description: "Line color: hex code, CSS color, or RGBA array.",
+                  },
                   label: { type: "string" },
                 },
                 required: ["category"],
@@ -96,17 +124,17 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
             dimUnmatched: {
               type: "boolean",
               description:
-                "If true, features that do not match the specified rules or value groups are dimmed to faint transparent gray, highlighting the filtered/matched features.",
+                "If true, features not matching the rules or value groups are dimmed to faint gray.",
             },
             hideUnmatched: {
               type: "boolean",
               description:
-                "If true, features that do not match the specified rules or value groups are completely hidden (transparent).",
+                "If true, unmatched features are completely hidden (transparent).",
             },
             ranges: {
               type: "array",
               description:
-                "For 'category' type: optional numeric range thresholds to classify a continuous numeric field into categories (e.g. [ { min: 25000, category: 'Best' }, { min: 10000, max: 25000, category: 'Average' }, { max: 10000, category: 'Poor' } ]).",
+                "For 'category' type: numeric threshold ranges (e.g. [ { min: 50000, category: 'High' }, { max: 10000, category: 'Low' } ]).",
               items: {
                 type: "object",
                 properties: {
@@ -120,18 +148,17 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
             mapping: {
               type: "object",
               description:
-                "For 'category' type: an object mapping each category value to its style. Each value should be an object with 'fillColor' (required, RGBA array), 'lineColor' (optional, RGBA array), and 'label' (optional, display name).",
+                "For 'category' type: object mapping each category value to its style ({ 'High': { fillColor: '#ef4444' } }).",
             },
             defaultColor: {
-              type: "array",
+              type: "string",
               description:
-                "For 'category' type: fallback RGBA color for values not in the mapping. Default: [148, 163, 184, 100].",
-              items: { type: "number" },
+                "Fallback color for values not in the mapping (hex, CSS name, or RGBA array).",
             },
             palette: {
               type: "string",
               description:
-                "Optional palette name for auto-assigning distinct colors: 'rainbow' (default, multi-hue), 'traffic' (green/yellow/red for ratings/performance), 'ocean' (blues/teals), 'heatmap' (yellow to red), 'viridis' (blue to yellow), 'sunset' (purple to orange), 'pastel'.",
+                "Curated color palette: 'rainbow', 'traffic', 'ocean', 'heatmap', 'viridis', 'sunset', 'pastel'.",
               enum: [
                 "rainbow",
                 "traffic",
@@ -142,75 +169,107 @@ export const STYLING_TOOLS: ClientToolDefinition[] = [
                 "pastel",
               ],
             },
-            pointRadius: {
-              type: "number",
+            extruded: {
+              type: "boolean",
               description:
-                "Optional radius in pixels for point circle features (e.g. 8).",
+                "Enable 3D extruded polygons/polygons with height. Automatically tilts the camera to 3D perspective.",
             },
-            sizeField: {
+            elevationField: {
               type: "string",
               description:
-                "Optional numeric property name to scale point circle radius dynamically (e.g., 'population', 'magnitude'). Creates a proportional bubble map.",
+                "Property field name for 3D extrusion height (e.g. 'population', 'density', 'count', 'score').",
             },
-            minRadius: {
+            elevationScale: {
               type: "number",
               description:
-                "Optional minimum circle radius for sizeField scaling (default: 4).",
+                "Multiplier scale for 3D height extrusion (e.g. 0.1, 1, 10, 50). Default is 1.",
             },
-            maxRadius: {
-              type: "number",
+            wireframe: {
+              type: "boolean",
+              description: "Whether to render wireframe edges on 3D extruded polygons.",
+            },
+            filled: {
+              type: "boolean",
               description:
-                "Optional maximum circle radius for sizeField scaling (default: 24).",
+                "Whether to fill polygon interior. Set to false for outline-only / boundary highlighting.",
+            },
+            stroked: {
+              type: "boolean",
+              description:
+                "Whether to draw borders/strokes on polygons.",
+            },
+            fillColor: {
+              type: "string",
+              description:
+                "Fill color (hex code like '#3b82f6', CSS color name like 'gold', or RGBA array [r, g, b, a]).",
+            },
+            lineColor: {
+              type: "string",
+              description:
+                "Border/stroke color (hex code like '#ef4444', CSS color name like 'crimson', or RGBA array).",
             },
             lineWidth: {
               type: "number",
               description:
-                "Optional stroke / outline width in pixels for polygon or line features (e.g. 2 or 4).",
+                "Stroke / outline width in pixels for polygon or line features (e.g. 2, 4).",
+            },
+            opacity: {
+              type: "number",
+              description: "Overall layer opacity between 0.0 and 1.0.",
+            },
+            pointRadius: {
+              type: "number",
+              description:
+                "Radius in pixels for point circle features (e.g. 8).",
+            },
+            sizeField: {
+              type: "string",
+              description:
+                "Property name to scale point circle radius dynamically (bubble map).",
+            },
+            minRadius: {
+              type: "number",
+              description:
+                "Minimum circle radius for sizeField scaling (default: 4).",
+            },
+            maxRadius: {
+              type: "number",
+              description:
+                "Maximum circle radius for sizeField scaling (default: 24).",
             },
             min: {
               type: "number",
               description:
-                "For 'gradient' type: minimum value of the numeric range.",
+                "For 'gradient' type: minimum value of numeric range.",
             },
             max: {
               type: "number",
               description:
-                "For 'gradient' type: maximum value of the numeric range.",
+                "For 'gradient' type: maximum value of numeric range.",
             },
             minColor: {
-              type: "array",
+              type: "string",
               description:
-                "For 'gradient' type: RGBA color at the minimum value.",
-              items: { type: "number" },
+                "For 'gradient' type: start color at minimum value (hex, CSS color, or RGBA array).",
             },
             maxColor: {
+              type: "string",
+              description:
+                "For 'gradient' type: end color at maximum value (hex, CSS color, or RGBA array).",
+            },
+            colorRange: {
               type: "array",
               description:
-                "For 'gradient' type: RGBA color at the maximum value.",
-              items: { type: "number" },
-            },
-            fillColor: {
-              type: "array",
-              description: "For 'solid' type: the fill RGBA color.",
-              items: { type: "number" },
-            },
-            lineColor: {
-              type: "array",
-              description: "For 'solid' type: optional line/stroke RGBA color.",
-              items: { type: "number" },
-            },
-            opacity: {
-              type: "number",
-              description: "For 'solid' type: optional opacity override (0-1).",
+                "Multi-stop color palette for gradients, heatmaps, or hexagons (e.g. ['#1e3a8a', '#3b82f6', '#10b981', '#f59e0b', '#ef4444']).",
             },
           },
           required: ["type"],
         },
       },
-      required: ["layerIndex", "style"],
+      required: ["style"],
       additionalProperties: false,
     },
-    strict: false, // Complex nested object, strict mode may interfere
+    strict: false,
   },
   {
     type: "function",
