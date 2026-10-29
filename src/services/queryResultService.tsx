@@ -71,22 +71,14 @@ export function promptLargeQueryResultSave(
               toast.dismiss(toastId);
               toast.info(`Query result (${formatted}) kept in session memory only.`);
             }}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-muted hover:bg-muted/80 transition-colors cursor-pointer"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-foreground bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer"
           >
             Session Only
           </button>
           <button
-            onClick={() => {
-              toast.dismiss(toastId);
-              const savePromise = queryResultService.saveResult(userId, sessionId, result, true);
-              toast.promise(savePromise, {
-                loading: `Saving query result (${formatted}) to cloud...`,
-                success: `Query result (${formatted}) saved successfully`,
-                error: (err: any) =>
-                  `Failed to save to cloud: ${err?.message || "Storage error"}`,
-              });
-            }}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 transition-colors shadow-sm cursor-pointer"
+            disabled
+            title="Cloud save for large query results (>10MB) is temporarily disabled"
+            className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground/50 bg-muted/40 border border-border/40 cursor-not-allowed select-none opacity-50"
           >
             Save Anyway
           </button>

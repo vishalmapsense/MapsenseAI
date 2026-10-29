@@ -157,10 +157,15 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  if (!apiKey || typeof apiKey !== "string" || !apiKey.trim()) {
+  const effectiveApiKey =
+    (apiKey && typeof apiKey === "string" && apiKey.trim()) ||
+    process.env.GEMINI_API_KEY ||
+    "";
+
+  if (!effectiveApiKey) {
     return new Response(
       JSON.stringify({
-        error: "API key is required. Please set your API key in Settings.",
+        error: "API key is required. Please set your API key in Settings or configure GEMINI_API_KEY in .env.local.",
       }),
       { status: 400, headers: { "Content-Type": "application/json" } }
     );
@@ -211,7 +216,7 @@ export async function POST(req: NextRequest) {
         const tabularBuffer: TabularDataBuffer = [];
         const { rootAgent, mapboxMcpToolset, spatialDataBuffer, tabularDataBuffer } =
           await createADKAgent(
-            apiKey.trim(),
+            effectiveApiKey,
             lastMessage,
             spatialBuffer,
             tabularBuffer,

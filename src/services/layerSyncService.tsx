@@ -237,16 +237,14 @@ export async function saveLayer(
                 toast.dismiss(toastId);
                 toast.info(`"${layerName}" (${formattedSize}) kept in session memory only.`);
               }}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground bg-muted hover:bg-muted/80 transition-colors cursor-pointer"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-foreground bg-secondary hover:bg-secondary/80 transition-colors cursor-pointer"
             >
               Session Only
             </button>
             <button
-              onClick={() => {
-                toast.dismiss(toastId);
-                saveLayer(sessionId, layerIndex, layerName, geojson, true);
-              }}
-              className="px-3 py-1.5 rounded-lg text-xs font-medium text-primary-foreground bg-primary hover:bg-primary/90 transition-colors shadow-sm cursor-pointer"
+              disabled
+              title="Cloud save for large layers (>10MB) is temporarily disabled"
+              className="px-3 py-1.5 rounded-lg text-xs font-medium text-muted-foreground/50 bg-muted/40 border border-border/40 cursor-not-allowed select-none opacity-50"
             >
               Save Anyway
             </button>

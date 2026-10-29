@@ -232,7 +232,7 @@ export const useModelSettingsStore = create<ModelSettingsState>()(
     (set, get) => ({
       selectedModelId: "gemini-3.5-flash", // Default: high-quota flash model
       apiKeys: {},
-      ollamaBaseUrl: "http://localhost:11434",
+      ollamaBaseUrl: process.env.NEXT_PUBLIC_OLLAMA_BASE_URL || "http://localhost:11434",
       isSettingsOpen: false,
 
       setSelectedModel: (id) => set({ selectedModelId: id }),

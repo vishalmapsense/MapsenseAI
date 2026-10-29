@@ -907,8 +907,9 @@ const PLAYG_API_BASE =
   "http://localhost:8000";
 
 const PLAYG_TOKEN =
+  process.env.PLAYG_BEARER_TOKEN ||
   process.env.BEARER_TOKEN ||
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig";
+  "";
 
 /**
  * Utility to print formatted ASCII summary table of category values & sector scores

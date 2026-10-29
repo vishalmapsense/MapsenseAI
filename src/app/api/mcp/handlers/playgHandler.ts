@@ -20,13 +20,20 @@ async function getPlaygMcpClient(): Promise<Client> {
 
   const transport = new StdioClientTransport({
     command: "node",
-    args: ["/Users/vishalkushwaha/Mapsense/MapsenseAI/playg-mcp-server/build/index.js"],
+    args: [
+      process.env.PLAYG_MCP_SCRIPT_PATH ||
+        "",
+    ],
     env: {
       ...process.env,
-      PLAYG_API_BASE: "http://localhost:8000",
-      USER_AGENT: "playg-mcp-server/1.0",
-      REDIS_URL: "redis://localhost:6379",
-      BEARER_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig",
+      PLAYG_API_BASE: process.env.PLAYG_API_BASE || "http://localhost:8000",
+      USER_AGENT: process.env.PLAYG_USER_AGENT || "playg-mcp-server/1.0",
+      REDIS_URL:
+        process.env.PLAYG_REDIS_URL ||
+        process.env.REDIS_URL ||
+        "redis://localhost:6379",
+      BEARER_TOKEN:
+        process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || "",
       INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
       FILE_PATH: "",
     },
@@ -72,8 +79,7 @@ export async function fetchPlaygJson(urlOrResponseText: string): Promise<any> {
     url = url.split("Response_URL: ")[1].trim();
   }
   const token =
-    process.env.BEARER_TOKEN ||
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImQ1ZGNlZmMxLWQ4ZjQtNDBmOC1iN2YxLWE2Mjc5YjhmNzkyNiIsImVtYWlsIjoiYWRtaW5AZW1haWwuY29tIiwib3JnYW5pemF0aW9uSWQiOiJmNmM2NjIzZS0xMWM3LTQzNTktOGJmMS05Zjg5YmQ4NjdjNWUiLCJvcmdhbml6YXRpb24iOiJQbGF0Zm9ybSBBZG1pbiIsInJvbGUiOiJTVVBFUl9BRE1JTiIsImlhdCI6MTc4NTIyNTc5Nn0.IdBtlbb2WbxtGcnGFYGwVqmHkZMR2BgKVsRjiE06Vig";
+    process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || "";
 
   const res = await fetch(url, {
     headers: {
