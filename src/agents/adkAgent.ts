@@ -978,7 +978,7 @@ export function createADKAgent(
   }
 
   const defaultPlaygScriptPath =
-    process.env.PLAYG_MCP_SCRIPT_PATH ;
+    process.env.PLAYG_MCP_SCRIPT_PATH || "";
   const defaultPlaygApiBase = process.env.PLAYG_API_BASE || "http://localhost:8000";
   const defaultPlaygRedisUrl =
     process.env.PLAYG_REDIS_URL || process.env.REDIS_URL || "redis://localhost:6379";
