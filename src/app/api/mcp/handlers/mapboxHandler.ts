@@ -1,7 +1,7 @@
 /**
- * Mapbox MCP Handler — using official SDK
+ * Mapbox MCP Handler — using official SDK with Stdio transport
  * ─────────────────────────────────────────────────────────────
- * Ye handler local Mapbox MCP server se connect karta hai
+ * Ye handler local/server Mapbox MCP process se connect karta hai
  * using the official @modelcontextprotocol/sdk.
  *
  * It uses a global singleton to keep the MCP process alive
@@ -15,6 +15,7 @@ import { MAPBOX_MCP_CONFIG } from "@/config/mcp.config";
 import { MCPProxyRequest, MCPProxyResponse, MCPTool } from "@/types/mcp.types";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 // ─── Global Singleton for MCP Client ─────────────────────────
 
@@ -27,7 +28,7 @@ if ((globalThis as any)._mcpClient) {
 let mcpClient: Client | null = null;
 async function getMcpClient(): Promise<Client> {
   if (mcpClient) {
-    // Health check: try a lightweight ping to see if the process is still alive
+    // Health check: try a lightweight ping to see if the connection is still alive
     try {
       await mcpClient.listTools();
       return mcpClient;
@@ -40,23 +41,64 @@ async function getMcpClient(): Promise<Client> {
     }
   }
 
+  const hostedUrl = MAPBOX_MCP_CONFIG.hostedUrl;
   const scriptPath = MAPBOX_MCP_CONFIG.serverScriptPath;
   const accessToken = MAPBOX_MCP_CONFIG.accessToken;
 
-  if (!scriptPath) {
-    throw new Error(
-      "MAPBOX_MCP_SCRIPT_PATH environment variable is not set. " +
-        "Please add it to your .env.local file."
-    );
+  // 1. Try Hosted Endpoint first (https://mcp.mapbox.com/mcp)
+  if (hostedUrl) {
+    try {
+      console.log(`[MCP] Attempting connection to Mapbox hosted endpoint: ${hostedUrl}`);
+      const httpTransport = new StreamableHTTPClientTransport(
+        new URL(hostedUrl),
+        {
+          requestInit: {
+            headers: {
+              ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+            },
+          },
+        }
+      );
+
+      const client = new Client(
+        {
+          name: "mapsense-ai",
+          version: "1.0.0",
+        },
+        {
+          capabilities: {},
+        }
+      );
+
+      await client.connect(httpTransport);
+      const tools = await client.listTools();
+      if (tools && tools.tools && tools.tools.length > 0) {
+        console.log(`✅ [MCP] Connected to Mapbox hosted endpoint! (${tools.tools.length} tools)`);
+        mcpClient = client;
+        (globalThis as any)._mcpClient = mcpClient;
+        return mcpClient;
+      }
+    } catch (httpErr: any) {
+      console.warn(
+        `⚠️ [MCP] Hosted endpoint connection failed (${httpErr?.message || httpErr}). Falling back to stdio...`
+      );
+    }
   }
 
+  // 2. Fallback to stdio process (node scriptPath or npx @mapbox/mcp-server)
+  const command = scriptPath ? "node" : "npx";
+  const args = scriptPath ? [scriptPath] : ["-y", "@mapbox/mcp-server"];
+
+  console.log(`[MCP] Starting Mapbox MCP via ${command} ${args.join(" ")}`);
+
   const transport = new StdioClientTransport({
-    command: "node",
-    args: [scriptPath],
+    command,
+    args,
     env: {
       ...process.env,
       CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
       MAPBOX_ACCESS_TOKEN: accessToken,
+      MAPBOX_SECRET_TOKEN: accessToken,
     },
   });
 

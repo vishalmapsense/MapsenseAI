@@ -931,45 +931,136 @@ export function createADKAgent(
     `[Mapbox MCP] Loading Mapbox spatial tools (excluding UI render tools)`,
   );
 
-  class FilteredMapboxMCPToolset extends MCPToolset {
+  /**
+   * Sanitizes MCP tools for Google GenAI / Gemini API schema validation.
+   * Mapbox MCP server declares GeoJSON outputSchema containing nested arrays
+   * without strict typed items (e.g. coordinates: array, snap_location: array).
+   * When @google/adk converts this to Gemini function declaration `response`,
+   * Gemini API rejects the request with:
+   * "GenerateContentRequest.tools[0].function_declarations[...].response... missing field."
+   * Removing `response` resolves this completely since Gemini function calling
+   * only consumes `parameters` (input schema), not `response` (output schema).
+   */
+  function sanitizeMcpToolsForGemini(tools: any[]): any[] {
+    for (const t of tools) {
+      if (!t) continue;
+      if (t.mcpTool && t.mcpTool.outputSchema) {
+        delete t.mcpTool.outputSchema;
+      }
+      const origGetDecl = t._getDeclaration?.bind(t);
+      if (origGetDecl) {
+        t._getDeclaration = () => {
+          const decl = origGetDecl();
+          if (decl && decl.response) {
+            delete decl.response;
+          }
+          return decl;
+        };
+      }
+    }
+    return tools;
+  }
+
+  class DynamicMapboxMCPToolset extends MCPToolset {
     private disallowed = new Set(["render_map_tool", "static_map_image_tool"]);
+    private fallbackToolset?: MCPToolset;
+
+    constructor(
+      primaryParams: any,
+      fallbackParams?: any,
+    ) {
+      super(primaryParams);
+      if (fallbackParams) {
+        this.fallbackToolset = new MCPToolset(fallbackParams);
+      }
+    }
 
     override async getTools(context?: any) {
+      // 1. Try Hosted Endpoint first
       try {
+        console.log(`[Mapbox MCP] Connecting to hosted endpoint (${MAPBOX_MCP_CONFIG.hostedUrl})...`);
         const tools = await super.getTools(context);
-        return tools.filter((t: any) => !this.disallowed.has(t.name));
+        if (tools && tools.length > 0) {
+          const filtered = tools.filter((t: any) => !this.disallowed.has(t.name));
+          console.log(
+            `✅ [Mapbox MCP] Hosted endpoint connected successfully! Loaded ${filtered.length} tools:`,
+            filtered.map((t: any) => t.name).join(", "),
+          );
+          return sanitizeMcpToolsForGemini(filtered);
+        }
       } catch (err: any) {
-        console.warn("⚠️ [ADK Agent] Failed to load Mapbox MCP tools:", err?.message || err);
-        return [];
+        console.warn("⚠️ [Mapbox MCP] Hosted endpoint connection failed:", err?.message || err);
       }
+
+      // 2. Seamless fallback to stdio (node scriptPath or npx @mapbox/mcp-server)
+      if (this.fallbackToolset) {
+        try {
+          console.log("[Mapbox MCP] Falling back to stdio process...");
+          const fallbackTools = await this.fallbackToolset.getTools(context);
+          const filtered = fallbackTools.filter((t: any) => !this.disallowed.has(t.name));
+          console.log(
+            `✅ [Mapbox MCP] Stdio fallback connected successfully! Loaded ${filtered.length} tools:`,
+            filtered.map((t: any) => t.name).join(", "),
+          );
+          return sanitizeMcpToolsForGemini(filtered);
+        } catch (fbErr: any) {
+          console.error("❌ [Mapbox MCP] Both hosted endpoint and stdio fallback failed:", fbErr?.message || fbErr);
+        }
+      }
+
+      return [];
     }
   }
 
-  const mapboxMcpToolset = new FilteredMapboxMCPToolset({
-    type: "StdioConnectionParams",
-    serverParams: {
-      command: "node",
-      args: [
-        process.env.MAPBOX_MCP_SCRIPT_PATH ||
-          MAPBOX_MCP_CONFIG.serverScriptPath,
-      ],
-      env: {
-        ...process.env,
-        CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
-        MAPBOX_ACCESS_TOKEN:
-          process.env.MAPBOX_SECRET_TOKEN || MAPBOX_MCP_CONFIG.accessToken,
-        MAPBOX_SECRET_TOKEN:
-          process.env.MAPBOX_SECRET_TOKEN || MAPBOX_MCP_CONFIG.accessToken,
-      } as Record<string, string>,
+  const mapboxScriptPath =
+    process.env.MAPBOX_MCP_SCRIPT_PATH ||
+    MAPBOX_MCP_CONFIG.serverScriptPath;
+  const mapboxCommand = mapboxScriptPath ? "node" : "npx";
+  const mapboxArgs = mapboxScriptPath
+    ? [mapboxScriptPath]
+    : ["-y", "@mapbox/mcp-server"];
+  const mapboxToken =
+    process.env.MAPBOX_SECRET_TOKEN ||
+    process.env.MAPBOX_ACCESS_TOKEN ||
+    MAPBOX_MCP_CONFIG.accessToken;
+  const mapboxHostedUrl =
+    process.env.MAPBOX_MCP_URL || MAPBOX_MCP_CONFIG.hostedUrl;
+
+  const mapboxMcpToolset = new DynamicMapboxMCPToolset(
+    // Primary: Hosted Mapbox MCP endpoint (https://mcp.mapbox.com/mcp)
+    {
+      type: "StreamableHTTPConnectionParams",
+      url: mapboxHostedUrl,
+      transportOptions: {
+        requestInit: {
+          headers: {
+            ...(mapboxToken ? { Authorization: `Bearer ${mapboxToken}` } : {}),
+          },
+        },
+      },
     },
-  });
+    // Fallback: Local / npx stdio process for reliability & offline safety
+    {
+      type: "StdioConnectionParams",
+      serverParams: {
+        command: mapboxCommand,
+        args: mapboxArgs,
+        env: {
+          ...process.env,
+          CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
+          MAPBOX_ACCESS_TOKEN: mapboxToken,
+          MAPBOX_SECRET_TOKEN: mapboxToken,
+        } as Record<string, string>,
+      },
+    },
+  );
 
   // 3. Set up the Playg MCP Toolsets
   class SafeDuckDbPlaygMCPToolset extends MCPToolset {
     override async getTools(context?: any) {
       try {
         const tools = await super.getTools(context);
-        return tools;
+        return sanitizeMcpToolsForGemini(tools);
       } catch (err: any) {
         console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for DuckDB:", err?.message || err);
         return [];
@@ -1009,7 +1100,9 @@ export function createADKAgent(
     override async getTools(context?: any) {
       try {
         const tools = await super.getTools(context);
-        return tools.filter((t: any) => !this.disallowed.has(t.name));
+        return sanitizeMcpToolsForGemini(
+          tools.filter((t: any) => !this.disallowed.has(t.name)),
+        );
       } catch (err: any) {
         console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for Playground:", err?.message || err);
         return [];
@@ -1685,14 +1778,16 @@ STEP 3 — HANDLE INCOMPLETE WORK:
 If verifying_agent responds with "INCOMPLETE: ...", read what's missing and route to the correct work agent to fix it using their transfer tool. Then send back to verifying_agent again.
 Repeat until verifying_agent confirms everything is done.
 
-STEP 4 — ERROR RECOVERY (CRITICAL):
-If a work agent returns an error like "Function X is not found in the toolsDict" or "UNKNOWN_ERROR", this means the task was sent to the WRONG agent. Do NOT give up. Immediately re-classify the failed tool and route to the CORRECT agent:
-- Failed tool is score_pincode_locus or compare_pincodes_locus_score → Route to map_ui_agent
-- Failed tool starts with map_* (map_rotate, map_zoom, map_fly_to, etc.) → Route to map_ui_agent
-- Failed tool is an MCP tool (search_*, directions_*, distance_*, category_*) → Route to mapbox_agent
-- Failed tool is a platform tool (get_zip_*, get_osm_*, get_user_*) → Route to playground_agent
-- Failed tool is run_duck_db_queries or run_client_duckdb_query → Route to duckdb_agent
-After re-routing, verify again with verifying_agent.
+STEP 4 — ERROR RECOVERY & LOOP PREVENTION (CRITICAL):
+If a work agent returns an error like "Function X is not found in the toolsDict" or "UNKNOWN_ERROR":
+- LOOP PREVENTION: If the failing agent was ALREADY the designated specialist (e.g., mapbox_agent failed on a mapbox search tool, or playground_agent failed on a zip boundary tool), DO NOT transfer back to that same agent! That tool is unavailable. Stop immediately and explain to the user in a short polite message that the service or tool is currently unavailable. NEVER retry the same failing tool in a loop.
+- If the task was sent to the WRONG agent, route to the CORRECT agent once:
+  * Failed tool is score_pincode_locus or compare_pincodes_locus_score → Route to map_ui_agent
+  * Failed tool starts with map_* (map_rotate, map_zoom, map_fly_to, etc.) → Route to map_ui_agent
+  * Failed tool is an MCP tool (search_*, directions_*, distance_*, category_*) → Route to mapbox_agent (ONLY if mapbox_agent has not already failed on it)
+  * Failed tool is a platform tool (get_zip_*, get_osm_*, get_user_*) → Route to playground_agent (ONLY if playground_agent has not already failed on it)
+  * Failed tool is run_duck_db_queries or run_client_duckdb_query → Route to duckdb_agent (ONLY if duckdb_agent has not already failed on it)
+After re-routing, verify again with verifying_agent. Never attempt more than 1 re-route per message.
 ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
