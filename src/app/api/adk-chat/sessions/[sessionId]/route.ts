@@ -19,11 +19,11 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     
-    const userId = user.email || user.id;
+    const userIds = [user.email, user.id].filter(Boolean) as string[];
 
     const session = await globalSessionService.getSession({
       appName: "MapsenseADK",
-      userId,
+      userId: userIds.join(","),
       sessionId,
     });
 
@@ -111,9 +111,10 @@ export async function DELETE(
       if (layerDeleteError) console.error("Failed to delete all session layers:", layerDeleteError);
 
       // Fetch all sessions to delete them individually (ADK does not provide deleteAll)
+      const userIds = [user.email, user.id].filter(Boolean) as string[];
       const response = await globalSessionService.listSessions({
         appName: "MapsenseADK",
-        userId,
+        userId: userIds.join(","),
       });
       const sessions = response.sessions || [];
       for (const s of sessions) {
@@ -165,11 +166,11 @@ export async function PATCH(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const userId = user.email || user.id;
+    const userIds = [user.email, user.id].filter(Boolean) as string[];
 
     const session = await globalSessionService.getSession({
       appName: "MapsenseADK",
-      userId,
+      userId: userIds.join(","),
       sessionId,
     });
 

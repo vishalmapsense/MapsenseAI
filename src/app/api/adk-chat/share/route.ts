@@ -19,12 +19,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
+    const userIds = [user.email, user.id].filter(Boolean) as string[];
     const userId = user.email || user.id;
 
     // Verify the session actually belongs to this user
     const session = await globalSessionService.getSession({
       appName: "MapsenseADK",
-      userId,
+      userId: userIds.join(","),
       sessionId,
     });
 

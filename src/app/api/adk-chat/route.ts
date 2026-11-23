@@ -23,6 +23,7 @@ import {
 } from "@/utils/spatialNormalizer";
 import { callMCPProcess } from "@/app/api/mcp/handlers/mapboxHandler";
 import { grantKey, GUARDED_TOOLS, resetToolCallCounters } from "@/agents/utils/toolGuardrail";
+import { SupabaseSessionService } from "@/services/supabaseSessionService";
 
 const createMcpResourceResolver = (mcpToolsetRef?: any) => async (uri: string) => {
   try {
@@ -75,6 +76,20 @@ const globalForADK = globalThis as unknown as {
 };
 
 const initSessionService = (): BaseSessionService => {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const supabaseKey =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (supabaseUrl && supabaseKey) {
+    try {
+      console.log("🗄️ [ADK] Initializing SupabaseSessionService (Supabase Cloud DB)...");
+      return new SupabaseSessionService();
+    } catch (err) {
+      console.warn("⚠️ [ADK] Failed to initialize SupabaseSessionService, falling back:", err);
+    }
+  }
+
   const dbUri = process.env.ADK_SESSION_DB_URI;
 
   if (dbUri && (dbUri.startsWith("postgresql://") || dbUri.startsWith("postgres://"))) {
@@ -256,9 +271,10 @@ export async function POST(req: NextRequest) {
           memoryService: globalMemoryService,
         });
 
+        const userIds = [user.email, user.id].filter(Boolean) as string[];
         let session = await runner.sessionService.getSession({
           appName: runner.appName,
-          userId: userId,
+          userId: userIds.join(","),
           sessionId: sessionId,
         });
 
