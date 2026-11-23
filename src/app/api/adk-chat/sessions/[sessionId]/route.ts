@@ -28,7 +28,8 @@ export async function GET(
     });
 
     if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      // Return empty messages instead of hard 404 to gracefully support new/unsaved sessions
+      return NextResponse.json({ success: true, messages: [] });
     }
 
     const messages: any[] = [];
@@ -173,7 +174,8 @@ export async function PATCH(
     });
 
     if (!session) {
-      return NextResponse.json({ error: "Session not found" }, { status: 404 });
+      // Return empty messages instead of hard 404 to gracefully support new/unsaved sessions
+      return NextResponse.json({ success: true, messages: [] });
     }
 
     await globalSessionService.appendEvent({

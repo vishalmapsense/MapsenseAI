@@ -3,6 +3,7 @@ import {
   Runner,
   InMemorySessionService,
   getSessionServiceFromUri,
+  DatabaseSessionService,
   InMemoryArtifactService,
   InMemoryMemoryService,
   BaseSessionService,
@@ -74,11 +75,33 @@ const globalForADK = globalThis as unknown as {
 };
 
 const initSessionService = (): BaseSessionService => {
-  const dbUri =
-    process.env.ADK_SESSION_DB_URI || "sqlite://mapsense_adk.sqlite";
+  const dbUri = process.env.ADK_SESSION_DB_URI;
+
+  if (dbUri && (dbUri.startsWith("postgresql://") || dbUri.startsWith("postgres://"))) {
+    try {
+      console.log(`🗄️ [ADK] Initializing DatabaseSessionService (PostgreSQL)...`);
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PostgreSqlDriver } = require("@mikro-orm/postgresql");
+      return new DatabaseSessionService({
+        clientUrl: dbUri,
+        driver: PostgreSqlDriver,
+        pool: {
+          min: 0,
+          max: 4,
+          acquireTimeoutMillis: 15000,
+          idleTimeoutMillis: 10000,
+        },
+      });
+    } catch (err) {
+      console.warn("⚠️ [ADK] Failed to initialize DatabaseSessionService for Postgres:", err);
+      return new InMemorySessionService();
+    }
+  }
+
+  const fallbackUri = dbUri || "sqlite://mapsense_adk.sqlite";
   try {
-    console.log(`🗄️ [ADK] Initializing DatabaseSessionService (${dbUri})...`);
-    return getSessionServiceFromUri(dbUri);
+    console.log(`🗄️ [ADK] Initializing SessionService (${fallbackUri})...`);
+    return getSessionServiceFromUri(fallbackUri);
   } catch (err) {
     console.warn(
       "⚠️ [ADK] Could not initialize DatabaseSessionService, falling back to InMemorySessionService:",
@@ -95,11 +118,10 @@ const globalArtifactService =
 const globalMemoryService =
   globalForADK.adkMemoryService ?? new InMemoryMemoryService();
 
-if (process.env.NODE_ENV !== "production") {
-  globalForADK.adkSessionService = globalSessionService;
-  globalForADK.adkArtifactService = globalArtifactService;
-  globalForADK.adkMemoryService = globalMemoryService;
-}
+// Persist singletons on globalThis across both dev and production warm lambdas
+globalForADK.adkSessionService = globalSessionService;
+globalForADK.adkArtifactService = globalArtifactService;
+globalForADK.adkMemoryService = globalMemoryService;
 
 // Same map as in the existing chat route
 const CLIENT_TOOL_COMMAND_MAP: Record<string, MapCommand["type"]> = {
