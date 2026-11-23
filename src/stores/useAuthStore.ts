@@ -26,10 +26,15 @@ export const useAuthStore = create<AuthState>((set, get) => {
     setAuthModalOpen: (isAuthModalOpen) => set({ isAuthModalOpen }),
     
     signInWithGoogle: async () => {
+      const origin =
+        typeof window !== "undefined" && window.location.origin
+          ? window.location.origin
+          : (process.env.NEXT_PUBLIC_SITE_URL || "https://main.d2df50755xi4a7.amplifyapp.com");
+
       await supabase.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: `${window.location.origin}/api/auth/callback`,
+          redirectTo: `${origin}/api/auth/callback`,
         },
       });
     },
