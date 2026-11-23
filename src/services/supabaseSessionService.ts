@@ -34,6 +34,79 @@ function getSupabaseClient(): SupabaseClient {
   return createClient(url, key);
 }
 
+/**
+ * Normalizes event data retrieved from or saved to Supabase:
+ * - Converts legacy snake_case (function_call, function_response) to camelCase (functionCall, functionResponse)
+ *   so the Google GenAI SDK can serialize oneof data fields properly.
+ * - Filters out empty parts or parts missing required oneof fields to prevent
+ *   "GenerateContentRequest.contents[...].parts[...].data: required oneof field 'data' must have one initialized field"
+ */
+export function normalizeEventForADK(raw: any): any {
+  if (!raw || typeof raw !== "object") return raw;
+  const evt = JSON.parse(JSON.stringify(raw));
+
+  if (evt.content && Array.isArray(evt.content.parts)) {
+    const validParts: any[] = [];
+    for (const p of evt.content.parts) {
+      if (!p || typeof p !== "object") continue;
+      const part = { ...p };
+
+      // 1. Convert snake_case tool calls & responses to camelCase
+      if (part.function_call && !part.functionCall) {
+        part.functionCall = part.function_call;
+        delete part.function_call;
+      }
+      if (part.function_response && !part.functionResponse) {
+        part.functionResponse = part.function_response;
+        delete part.function_response;
+      }
+      if (part.inline_data && !part.inlineData) {
+        part.inlineData = part.inline_data;
+        delete part.inline_data;
+      }
+      if (part.file_data && !part.fileData) {
+        part.fileData = part.file_data;
+        delete part.file_data;
+      }
+
+      // 2. Validate oneof data fields
+      const hasText = typeof part.text === "string" && part.text.length > 0;
+      const hasFnCall = part.functionCall && typeof part.functionCall === "object" && typeof part.functionCall.name === "string";
+      const hasFnResp = part.functionResponse && typeof part.functionResponse === "object" && typeof part.functionResponse.name === "string";
+      const hasInline = !!part.inlineData;
+      const hasFile = !!part.fileData;
+
+      if (hasText || hasFnCall || hasFnResp || hasInline || hasFile) {
+        validParts.push(part);
+      } else {
+        // Drop empty parts without oneof data
+        console.warn("[normalizeEventForADK] Dropped part lacking oneof data field:", JSON.stringify(p).substring(0, 100));
+      }
+    }
+
+    if (validParts.length > 0) {
+      evt.content.parts = validParts;
+    } else {
+      // Fallback: Ensure at least one part exists to avoid empty contents error
+      evt.content.parts = [{ text: "..." }];
+    }
+  }
+
+  // Convert snake_case action deltas
+  if (evt.actions) {
+    if (evt.actions.state_delta && !evt.actions.stateDelta) {
+      evt.actions.stateDelta = evt.actions.state_delta;
+      delete evt.actions.state_delta;
+    }
+    if (evt.actions.artifact_delta && !evt.actions.artifactDelta) {
+      evt.actions.artifactDelta = evt.actions.artifact_delta;
+      delete evt.actions.artifact_delta;
+    }
+  }
+
+  return evt;
+}
+
 export class SupabaseSessionService extends BaseSessionService {
   private supabase: SupabaseClient;
 
@@ -135,7 +208,8 @@ export class SupabaseSessionService extends BaseSessionService {
       }
 
       const events: Event[] = (eventRows || []).map((row: any) => {
-        const evt = row.event_data || {};
+        const raw = row.event_data || {};
+        const evt = normalizeEventForADK(raw);
         return {
           id: row.id || evt.id,
           invocationId: row.invocation_id || evt.invocationId,
@@ -292,7 +366,8 @@ export class SupabaseSessionService extends BaseSessionService {
         });
       }
 
-      // 1. Persist the event into Supabase events table
+      // 1. Persist the event into Supabase events table (normalized)
+      const normalizedEvent = normalizeEventForADK(event);
       const { error: evtErr } = await this.supabase.from("events").insert({
         id: eventId,
         app_name: session.appName || "MapsenseADK",
@@ -300,7 +375,7 @@ export class SupabaseSessionService extends BaseSessionService {
         session_id: session.id,
         invocation_id: invocationId,
         timestamp: eventTimestamp,
-        event_data: event,
+        event_data: normalizedEvent,
       });
 
       if (evtErr) {
