@@ -1526,6 +1526,62 @@ export function createADKAgent(
     return undefined;
   };
 
+  // ─── Shared BeforeModelCallback: Content Sanitizer for Gemini ───
+  // Sanitizes contents to prevent:
+  // "GenerateContentRequest.contents[...].parts[...].data: required oneof field 'data' must have one initialized field"
+  const sanitizeBeforeModelCallback = ({ request }: { request: any }) => {
+    if (request && Array.isArray(request.contents)) {
+      for (let cIdx = request.contents.length - 1; cIdx >= 0; cIdx--) {
+        const content = request.contents[cIdx];
+        if (!content || !Array.isArray(content.parts)) continue;
+
+        const cleanedParts: any[] = [];
+        for (const rawPart of content.parts) {
+          if (!rawPart || typeof rawPart !== "object") continue;
+          const part = { ...rawPart };
+
+          // 1. Convert legacy snake_case tool calls/responses to camelCase for Gemini SDK
+          if (part.function_call && !part.functionCall) {
+            part.functionCall = part.function_call;
+            delete part.function_call;
+          }
+          if (part.function_response && !part.functionResponse) {
+            part.functionResponse = part.function_response;
+            delete part.function_response;
+          }
+          if (part.inline_data && !part.inlineData) {
+            part.inlineData = part.inline_data;
+            delete part.inline_data;
+          }
+          if (part.file_data && !part.fileData) {
+            part.fileData = part.file_data;
+            delete part.file_data;
+          }
+
+          // 2. Validate oneof data fields
+          const hasText = typeof part.text === "string" && part.text.length > 0;
+          const hasFnCall = part.functionCall && typeof part.functionCall === "object" && typeof part.functionCall.name === "string";
+          const hasFnResp = part.functionResponse && typeof part.functionResponse === "object" && typeof part.functionResponse.name === "string";
+          const hasInline = !!part.inlineData;
+          const hasFile = !!part.fileData;
+
+          if (hasText || hasFnCall || hasFnResp || hasInline || hasFile) {
+            cleanedParts.push(part);
+          } else {
+            console.warn(`[BeforeModelCallback] Filtered out part with no valid oneof data field in contents[${cIdx}]`);
+          }
+        }
+
+        if (cleanedParts.length === 0) {
+          content.parts = [{ text: "..." }];
+        } else {
+          content.parts = cleanedParts;
+        }
+      }
+    }
+    return undefined;
+  };
+
   // ─── Sub-Agent 1: Mapbox Agent (Mapbox MCP Tools) ───────────
   const mapboxAgent = new LlmAgent({
     model: modelToUse,
@@ -1553,6 +1609,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: [mapboxMcpToolset, hitlTool],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
     afterToolCallback: spatialInterceptCallback,
   });
@@ -1582,6 +1639,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: [playgroundMcpToolset, hitlTool],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
     afterToolCallback: spatialInterceptCallback,
   });
@@ -1626,6 +1684,7 @@ ${AGENT_SAFETY_STAND_RULE}`,
       ...(clearStyleTool ? [clearStyleTool] : []),
       hitlTool,
     ],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
     afterToolCallback: tabularInterceptCallback,
   });
@@ -1659,6 +1718,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: mapUiClientTools,
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
   });
 
@@ -1735,6 +1795,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: [hitlTool],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
   });
 
@@ -1792,6 +1853,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: [hitlTool],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
     subAgents: [
       mapboxAgent,
@@ -1818,6 +1880,7 @@ ${LANG_RULE}
 ${HITL_RULE}
 ${AGENT_SAFETY_STAND_RULE}`,
     tools: [hitlTool],
+    beforeModelCallback: sanitizeBeforeModelCallback,
     beforeToolCallback: toolGuardrailCallback,
     subAgents: [plannerAgent],
     contextCompactors: [
