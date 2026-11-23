@@ -1,0 +1,156 @@
+/**
+ * MCP Types & Interfaces
+ * ─────────────────────────────────────────────────────────────
+ * Ye types dono adapters (Mapbox + Backend) implement karte hain.
+ * Isse UI layer ko koi fark nahi padta ki kaunsa MCP use ho raha hai.
+ * ─────────────────────────────────────────────────────────────
+ */
+
+// ─── Chat Message Types ────────────────────────────────────────
+
+export type MessageRole = "user" | "assistant" | "system";
+
+export interface TokenUsage {
+  promptTokenCount: number;
+  candidatesTokenCount: number;
+  totalTokenCount: number;
+}
+
+export interface AgentEventInfo {
+  agentName: string;
+  type: "tool_call" | "completion";
+  description: string;
+  toolName?: string;
+  tokens?: number;
+}
+
+/** Supported deck.gl visualization layer types */
+export type VisualizationLayerType =
+  | "GeoJsonLayer"       // Default — polygons, lines, points as-is
+  | "HexagonLayer"       // Density aggregation in hexagonal bins (3D)
+  | "HeatmapLayer"       // Smooth gradient density surface
+  | "GridLayer"          // Square grid aggregation
+  | "ScreenGridLayer"    // Screen-space grid (ultra fast for millions of points)
+  | "ScatterplotLayer"   // Simple circles for point data
+  | "ArcLayer"           // Origin→Destination arcs
+  | "PathLayer"          // GPS tracks, routes, multi-point lines
+  | "ColumnLayer"        // 3D columns at point locations
+  | "H3HexagonLayer"     // H3 hex index based hexagons
+  | "H3ClusterLayer"     // H3 hex cluster aggregation
+  | "GeohashLayer"       // Geohash-based grid cells
+  | "IconLayer"          // Point markers with icons
+  | "SolidPolygonLayer"  // Filled polygon rendering (no stroke)
+  | "ContourLayer";      // Contour/isoline density bands
+
+export interface SuggestedVisualizationLayer {
+  type: VisualizationLayerType;
+  label: string;           // Human-readable name, e.g. "3D Hexagon Grid"
+  description: string;     // Why this layer fits
+  isPrimary: boolean;      // AI's top recommendation
+}
+
+/** Tabular result from a DuckDB query — displayed in the client QueryResultsPanel. */
+export interface QueryResultData {
+  queryId: string;
+  queryText: string;
+  columns: string[];
+  rows: any[][];
+  rowCount: number;
+  totalRowCount: number;
+  truncated: boolean;
+  executionTimeMs?: number;
+  toolName: string;
+  timestamp: number;
+  hasSpatialColumn: boolean;
+  spatialColumnName?: string;
+  /** AI-recommended visualization layers for this query result */
+  suggestedLayers?: SuggestedVisualizationLayer[];
+}
+
+export interface ChatMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  timestamp: number;
+  toolCalls?: MCPToolCall[];
+  isLoading?: boolean;
+  statusMessage?: string;
+  agentEvents?: AgentEventInfo[];
+  usage?: TokenUsage;
+  executionMessages?: string[];
+  queryResults?: QueryResultData[];
+  suggestions?: string[];
+}
+
+// ─── MCP Tool Types ────────────────────────────────────────────
+
+export interface MCPTool {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+}
+
+export interface MCPToolCall {
+  toolName: string;
+  arguments: Record<string, unknown>;
+  result?: unknown;
+  /** Agar tool result large tha aur resource store mein gaya, to yahan URI hoga */
+  resourceUri?: string;
+}
+
+// ─── MCP Resource Types ───────────────────────────────────────
+
+/** MCP resource mechanism se fetched GeoJSON resource ka descriptor */
+export interface GeoJSONResource {
+  uri: string;       // e.g. "geojson://resource/uuid"
+  sizeBytes: number;
+  storedAt: number;
+  expiresAt: number;
+}
+
+// ─── MCP Adapter Interface ────────────────────────────────────
+// Har provider (mapbox, backend) ko ye interface implement karna hoga
+
+export interface MCPAdapter {
+  /**
+   * MCP server se available tools list karo.
+   */
+  listTools(): Promise<MCPTool[]>;
+
+  /**
+   * Ek specific tool call karo aur result wapas lao.
+   */
+  callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
+
+  /**
+   * User message bhejo — AI response aur tool calls return hote hain.
+   * (High-level: internally listTools + callTool use karta hai)
+   */
+  chat(
+    messages: Array<{ role: MessageRole; content: string }>,
+    systemPrompt?: string
+  ): Promise<MCPChatResponse>;
+}
+
+// ─── MCP Response Types ────────────────────────────────────────
+
+export interface MCPChatResponse {
+  content: string;
+  toolCalls?: MCPToolCall[];
+}
+
+// ─── API Proxy Request/Response (for Next.js route) ───────────
+
+export interface MCPProxyRequest {
+  action: "listTools" | "callTool" | "chat";
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  messages?: Array<{ role: MessageRole; content: string }>;
+  systemPrompt?: string;
+}
+
+export interface MCPProxyResponse {
+  success: boolean;
+  data?: unknown;
+  error?: string;
+}

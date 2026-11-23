@@ -1,0 +1,305 @@
+/**
+ * Spatial Data Interceptor
+ * ─────────────────────────────────────────────────────────────
+ * Intercepts MCP tool responses at the agent level (via afterToolCallback),
+ * extracts large geospatial data (GeoJSON, Response_URLs, mapbox URIs),
+ * stores it in a shared buffer, and returns a lightweight text summary
+ * to the LLM — so the LLM never sees raw geometry data.
+ *
+ * Used by: adkAgent.ts → afterToolCallback on mapbox_agent & playground_agent
+ * Consumed by: route.ts → reads extractedSpatialData after runner completes
+ * ─────────────────────────────────────────────────────────────
+ */
+import {
+  normalizeToGeoJSON,
+  fetchAndNormalizeSpatialUrl,
+} from "@/utils/spatialNormalizer";
+import type { MapCommand } from "@/stores/useMapStore";
+
+/** A single piece of spatial data intercepted from a tool response. */
+export interface InterceptedSpatialData {
+  toolName: string;
+  label: string;
+  geojson: any; // normalized GeoJSON FeatureCollection
+  metadata: {
+    featureCount: number;
+    distanceKm?: string;
+    durationMin?: string;
+    summary?: string;
+    centroid?: [number, number];
+    boundingRadiusMeters?: number;
+  };
+}
+
+/**
+ * Shared buffer — created per-request by the route, passed into createADKAgent,
+ * and populated by afterToolCallback. After runner.runAsync() completes,
+ * the route reads this buffer to generate clientToolCommands.
+ */
+export type SpatialDataBuffer = InterceptedSpatialData[];
+
+/**
+ * Generates a short text summary for the LLM from extracted spatial data.
+ * This replaces the full GeoJSON payload that would otherwise go to the LLM.
+ */
+export function createLightweightSummary(
+  toolName: string,
+  metadata: InterceptedSpatialData["metadata"],
+  rawResponse?: any,
+): string {
+  const fc = metadata.featureCount;
+
+  // Zipcode / District boundary response
+  if (toolName === "get_zip_data" || toolName === "get_district_data") {
+    const info = Array.isArray(rawResponse) ? rawResponse[0] : rawResponse;
+    const name = info?.officeName || info?.dtname || info?.name || "Region Boundary";
+    const zip = info?.zipcode || metadata?.summary || "";
+    const coordsStr = metadata?.centroid
+      ? ` Centroid: latitude ${metadata.centroid[1].toFixed(5)}, longitude ${metadata.centroid[0].toFixed(5)}.`
+      : "";
+    const radiusStr = metadata?.boundingRadiusMeters
+      ? ` Search radius covering polygon: ${metadata.boundingRadiusMeters}m.`
+      : "";
+
+    return (
+      `✅ Boundary polygon loaded for ${name}${zip ? ` (${zip})` : ""}.${coordsStr}${radiusStr} ` +
+      `Boundary is displayed on the map. To query amenities (run_osm_query), use these exact centroid coordinates and radius ` +
+      `so all amenities inside this boundary are fetched and automatically clipped.`
+    );
+  }
+
+  // Directions / route response
+  if (rawResponse?.routes && rawResponse.routes.length > 0) {
+    const r = rawResponse.routes[0];
+    const dist = metadata.distanceKm ? `${metadata.distanceKm} km` : (r.distance ? `${(r.distance / 1000).toFixed(1)} km` : "");
+    const dur = metadata.durationMin ? `${metadata.durationMin} min` : (r.duration ? `${Math.round(r.duration / 60)} min` : "");
+    const via = r.legs?.[0]?.summary || r.leg_summaries?.[0] || metadata.summary || "";
+    return (
+      `✅ Route found${dist ? `: ${dist}` : ""}${dur ? `, ~${dur}` : ""}${via ? ` via ${via}` : ""}. ` +
+      `${fc} features (including complete route path) extracted and sent directly to the map for rendering. ` +
+      `Do NOT call map_add_geojson — the map already has the data.`
+    );
+  }
+
+  // Geocoding / search places response (CRITICAL for disambiguation & multiple choices)
+  const isGeocodeOrSearch =
+    toolName.includes("geocode") ||
+    toolName.includes("search") ||
+    rawResponse?.type === "geocode" ||
+    (Array.isArray(rawResponse?.features) &&
+      rawResponse.features.some((f: any) => f?.place_name || f?.properties?.place_name));
+
+  if (isGeocodeOrSearch && Array.isArray(rawResponse?.features) && rawResponse.features.length > 0) {
+    const places = rawResponse.features.slice(0, 5).map((f: any, idx: number) => {
+      const name = f.place_name || f.properties?.place_name || f.properties?.name || f.text || `Location ${idx + 1}`;
+      const coords = f.center || f.geometry?.coordinates;
+      const coordsStr = Array.isArray(coords) && coords.length >= 2
+        ? ` [${Number(coords[0]).toFixed(4)}, ${Number(coords[1]).toFixed(4)}]`
+        : "";
+      return `${idx + 1}. ${name}${coordsStr}`;
+    });
+
+    return (
+      `✅ Found ${fc} candidate location(s) from ${toolName}:\n` +
+      places.join("\n") + "\n\n" +
+      `All ${fc} locations have been sent to the map for rendering. ` +
+      `IMPORTANT: If the user request was ambiguous or multiple locations match the name, list these exact candidate places in your response and provide [OPTION: <place_name>] chips for each choice so the user can easily click one.`
+    );
+  }
+
+  // Isochrone response
+  if (rawResponse?.features && rawResponse.type === "FeatureCollection") {
+    return (
+      `✅ ${fc} spatial features returned and sent directly to the map. ` +
+      `Do NOT re-render the data — the map already has it.`
+    );
+  }
+
+  // Nearby POIs response (ground_location_tool or POI search)
+  if (Array.isArray(rawResponse?.nearby_pois) && rawResponse.nearby_pois.length > 0) {
+    const place = rawResponse.place || "the specified location";
+    return (
+      `✅ Found ${rawResponse.nearby_pois.length} places near ${place}. All locations have been extracted and sent directly to the map for rendering. ` +
+      `Do NOT call map_add_geojson or render_map_tool — the data is already on the map.`
+    );
+  }
+
+  // Generic MCP response
+  return (
+    `✅ ${fc} features extracted from ${toolName} and sent directly to the map for rendering. ` +
+    `Do NOT call map_add_geojson or map_load_url — the data is already on the map.`
+  );
+}
+
+/**
+ * Checks if a raw MCP tool response contains spatial data that should be
+ * intercepted, extracted, and bypassed from the LLM.
+ *
+ * Returns { normalized, rawParsed } if spatial data found, null otherwise.
+ */
+export function extractSpatialFromResponse(
+  toolName: string,
+  rawResponse: any,
+): { normalized: any; rawParsed: any } | null {
+  if (!rawResponse || typeof rawResponse !== "object") return null;
+
+  // ── Case 0: structuredContent (MCP structured output) ──
+  if (rawResponse.structuredContent) {
+    const sc = rawResponse.structuredContent;
+
+    // Check if this is a route response that lacks geometry but has a mapboxRender ref
+    const isRouteWithoutGeom =
+      Array.isArray(sc.routes) &&
+      sc.routes.length > 0 &&
+      !sc.routes.some((r: any) => r.geometry) &&
+      sc.mapboxRender?.ref;
+
+    if (isRouteWithoutGeom) {
+      console.log(
+        `🗺️ [extractSpatialFromResponse] Route response without geometry detected, delegating to mapboxRender ref: ${sc.mapboxRender.ref}`,
+      );
+      return {
+        normalized: null,
+        rawParsed: {
+          _mapboxUri: sc.mapboxRender.ref,
+          _needsMcpResolve: true,
+          routes: sc.routes,
+          waypoints: sc.waypoints,
+        },
+      };
+    }
+
+    const norm = normalizeToGeoJSON(sc, toolName || "Spatial Data");
+    if (norm?.features?.length > 0) {
+      return { normalized: norm, rawParsed: sc };
+    }
+  }
+
+  // ── Case 1: MCP content blocks array ──
+  if (Array.isArray(rawResponse.content)) {
+    for (const block of rawResponse.content) {
+      // Text block — inline JSON/GeoJSON
+      if (block.type === "text" && typeof block.text === "string") {
+        const trimmed = block.text.trim();
+
+        // Check for Response_URL pattern (Playground tools)
+        const responseUrlMatch = trimmed.match(
+          /Response_URL:\s*(https?:\/\/[^\s"']+)/,
+        );
+        if (responseUrlMatch) {
+          // We can't do async fetch inside a sync check — return a special marker
+          return {
+            normalized: null,
+            rawParsed: { _responseUrl: responseUrlMatch[1], _needsFetch: true },
+          };
+        }
+
+        // Check for inline JSON
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+          const norm = normalizeToGeoJSON(trimmed, toolName || "Spatial Data");
+          if (norm?.features?.length > 0) {
+            return { normalized: norm, rawParsed: JSON.parse(trimmed) };
+          }
+        }
+
+        // Check for mapbox:// URI (temp, selffetch, or inline)
+        const mapboxUriMatch = trimmed.match(/mapbox:\/\/(?:temp|selffetch|inline)\/[^\s"']+/);
+        if (mapboxUriMatch) {
+          return {
+            normalized: null,
+            rawParsed: {
+              _mapboxUri: mapboxUriMatch[0],
+              _needsMcpResolve: true,
+            },
+          };
+        }
+
+        // Check for Mapbox API URL
+        const httpUrlMatch = trimmed.match(
+          /https:\/\/api\.mapbox\.com\/[^\s"']+/,
+        );
+        if (httpUrlMatch) {
+          return {
+            normalized: null,
+            rawParsed: { _httpUrl: httpUrlMatch[0], _needsFetch: true },
+          };
+        }
+      }
+
+      // Resource block — inline data or URI
+      if (block.type === "resource" && block.resource) {
+        if (block.resource.text) {
+          const norm = normalizeToGeoJSON(
+            block.resource.text,
+            toolName || "Spatial Data",
+          );
+          if (norm?.features?.length > 0) {
+            return { normalized: norm, rawParsed: block.resource.text };
+          }
+        } else if (block.resource.blob) {
+          try {
+            const decoded = Buffer.from(block.resource.blob, "base64").toString(
+              "utf-8",
+            );
+            const norm = normalizeToGeoJSON(
+              decoded,
+              toolName || "Spatial Data",
+            );
+            if (norm?.features?.length > 0) {
+              return { normalized: norm, rawParsed: decoded };
+            }
+          } catch {
+            /* ignore decode errors */
+          }
+        } else if (block.resource.uri) {
+          return {
+            normalized: null,
+            rawParsed: {
+              _mapboxUri: block.resource.uri,
+              _needsMcpResolve: true,
+            },
+          };
+        }
+      }
+    }
+  }
+
+  // ── Case 2: Direct object ──
+  const norm = normalizeToGeoJSON(rawResponse, toolName || "Spatial Data");
+  if (norm?.features?.length > 0) {
+    return { normalized: norm, rawParsed: rawResponse };
+  }
+
+  // ── Case 3: URL string field ──
+  if (typeof rawResponse.url === "string") {
+    return {
+      normalized: null,
+      rawParsed: { _httpUrl: rawResponse.url, _needsFetch: true },
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Extracts route-level metadata from raw Mapbox API responses
+ * (distance, duration, etc.) without needing the full GeoJSON.
+ */
+export function extractMetadata(
+  rawParsed: any,
+  featureCount: number,
+): InterceptedSpatialData["metadata"] {
+  const meta: InterceptedSpatialData["metadata"] = { featureCount };
+
+  if (rawParsed?.routes && rawParsed.routes.length > 0) {
+    const r = rawParsed.routes[0];
+    if (r.distance)
+      meta.distanceKm = (r.distance / 1000).toFixed(1);
+    if (r.duration)
+      meta.durationMin = String(Math.round(r.duration / 60));
+    if (r.legs?.[0]?.summary) meta.summary = r.legs[0].summary;
+    else if (Array.isArray(r.leg_summaries) && r.leg_summaries[0]) meta.summary = r.leg_summaries[0];
+  }
+
+  return meta;
+}

@@ -1,0 +1,90 @@
+/**
+ * Client Tools — Layers
+ * ─────────────────────────────────────────────────────────────
+ * Layer management tools: clear, toggle visibility, set base map.
+ * Executed directly on the frontend (OpenLayers).
+ *
+ * Format: Standard JSON Schema (provider-agnostic).
+ * Conversion to Gemini/OpenAI format happens at runtime.
+ * ─────────────────────────────────────────────────────────────
+ */
+import type { ClientToolDefinition } from "@/config/clientTools/types";
+
+export const LAYER_TOOLS: ClientToolDefinition[] = [
+  {
+    type: "function",
+    name: "map_clear_layers",
+    description:
+      "Remove all data layers from the map. Use when the user says 'clear the map', 'remove all layers', 'start fresh', etc. CRITICAL: This is a DESTRUCTIVE action. You MUST call `request_user_permission` tool FIRST to get explicit user consent before returning this tool. Do NOT call this tool without user permission.",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "map_toggle_layer",
+    description:
+      "Show or hide a specific data layer by its index. Use when the user says 'hide layer 1', 'show the first layer', etc.",
+    parameters: {
+      type: "object",
+      properties: {
+        layerIndex: {
+          type: "number",
+          description: "Zero-based index of the layer to toggle.",
+        },
+        visible: {
+          type: "boolean",
+          description: "True to show the layer, false to hide it.",
+        },
+      },
+      required: ["layerIndex", "visible"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "map_set_base",
+    description:
+      "Switch the base map style. Available options: 'osm' (OpenStreetMap), 'carto-light', 'carto-dark', 'satellite'. Use when the user wants to change the map background.",
+    parameters: {
+      type: "object",
+      properties: {
+        base: {
+          type: "string",
+          description:
+            "Base map identifier. Must be one of: 'osm', 'carto-light', 'carto-dark', 'satellite'.",
+          enum: ["osm", "carto-light", "carto-dark", "satellite"],
+        },
+      },
+      required: ["base"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+  {
+    type: "function",
+    name: "map_load_url",
+    description:
+      "Fetch spatial or tabular data (.geojson, .parquet, .csv, .json) from any remote URL (HTTP/HTTPS) or local file path (e.g., from [ATTACHED_LOCAL_FILES]) and display it on the map. DO NOT use this for URIs returned by MCP tools (like mapbox://temp/...) — the system renders those automatically.",
+    parameters: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "The full HTTP/HTTPS URL or local file path pointing to a GeoJSON, Parquet, or CSV resource.",
+        },
+        label: {
+          type: "string",
+          description: "Optional label describing what this data represents (e.g., 'Kings Park POI', 'Toilet Map').",
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    strict: true,
+  },
+];

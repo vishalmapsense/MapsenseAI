@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -41,3 +42,10 @@ CLAUDE.md
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+skills-lock.json
+.agents
+# ADK local database
+mapsense_adk.sqlite
+*.sqlite
+*.sqlite3
+
