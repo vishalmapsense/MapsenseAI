@@ -13,11 +13,11 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     
-    const userId = user.email || user.id;
+    const userIds = [user.email, user.id].filter(Boolean) as string[];
 
     const response = await globalSessionService.listSessions({
       appName: "MapsenseADK",
-      userId,
+      userId: userIds.join(","),
       order: "desc",
     });
 

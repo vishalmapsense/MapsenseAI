@@ -1,6 +1,8 @@
-const { spawn } = require("child_process");
+require("dotenv").config({ path: ".env.local" });
 
-const child = spawn("node", ["/Users/vishalkushwaha/Mapsense/Mapbox-MCP-server/mcp-server/dist/esm/index.js"]);
+const scriptPath =
+  process.env.MAPBOX_MCP_SCRIPT_PATH ;
+const child = spawn("node", [scriptPath]);
 
 child.stdout.on("data", (data) => {
   const lines = data.toString().split("\n");
