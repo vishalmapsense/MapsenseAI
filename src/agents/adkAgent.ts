@@ -964,6 +964,7 @@ export function createADKAgent(
   class DynamicMapboxMCPToolset extends MCPToolset {
     private disallowed = new Set(["render_map_tool", "static_map_image_tool"]);
     private fallbackToolset?: MCPToolset;
+    private cachedTools: any[] | null = null;
 
     constructor(
       primaryParams: any,
@@ -976,6 +977,10 @@ export function createADKAgent(
     }
 
     override async getTools(context?: any) {
+      if (this.cachedTools && this.cachedTools.length > 0) {
+        return this.cachedTools;
+      }
+
       // 1. Try Hosted Endpoint first
       try {
         console.log(`[Mapbox MCP] Connecting to hosted endpoint (${MAPBOX_MCP_CONFIG.hostedUrl})...`);
@@ -986,7 +991,9 @@ export function createADKAgent(
             `✅ [Mapbox MCP] Hosted endpoint connected successfully! Loaded ${filtered.length} tools:`,
             filtered.map((t: any) => t.name).join(", "),
           );
-          return sanitizeMcpToolsForGemini(filtered);
+          const sanitized = sanitizeMcpToolsForGemini(filtered);
+          this.cachedTools = sanitized;
+          return sanitized;
         }
       } catch (err: any) {
         console.warn("⚠️ [Mapbox MCP] Hosted endpoint connection failed:", err?.message || err);
@@ -1002,7 +1009,9 @@ export function createADKAgent(
             `✅ [Mapbox MCP] Stdio fallback connected successfully! Loaded ${filtered.length} tools:`,
             filtered.map((t: any) => t.name).join(", "),
           );
-          return sanitizeMcpToolsForGemini(filtered);
+          const sanitized = sanitizeMcpToolsForGemini(filtered);
+          this.cachedTools = sanitized;
+          return sanitized;
         } catch (fbErr: any) {
           console.error("❌ [Mapbox MCP] Both hosted endpoint and stdio fallback failed:", fbErr?.message || fbErr);
         }
@@ -1034,6 +1043,8 @@ export function createADKAgent(
       transportOptions: {
         requestInit: {
           headers: {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
             ...(mapboxToken ? { Authorization: `Bearer ${mapboxToken}` } : {}),
           },
         },

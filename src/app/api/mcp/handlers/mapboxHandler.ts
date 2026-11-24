@@ -54,6 +54,8 @@ async function getMcpClient(): Promise<Client> {
         {
           requestInit: {
             headers: {
+              "Accept": "application/json, text/event-stream",
+              "Content-Type": "application/json",
               ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
             },
           },
