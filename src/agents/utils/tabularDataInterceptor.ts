@@ -14,6 +14,7 @@
 
 import type { SuggestedVisualizationLayer } from "@/types/mcp.types";
 import { suggestVisualizationLayers } from "./layerSuggestionEngine";
+import { extractPlaygResponseUrl } from "./spatialDataInterceptor";
 import wkx from "wkx";
 
 /** WKT geometry type keywords */
@@ -332,13 +333,13 @@ export async function extractTabularFromResponse(
           }
         }
 
-        // Check for Response_URL
+        // Check for Response_URL / Playg responseURL
         if (!data) {
-          const urlMatch = trimmed.match(/Response_URL:\s*(https?:\/\/[^\s"']+)/i);
-          if (urlMatch && urlMatch[1]) {
+          const responseUrl = extractPlaygResponseUrl(trimmed);
+          if (responseUrl) {
             try {
-              console.log(`  ↳ [Tabular Interceptor] Fetching Response_URL: ${urlMatch[1]}`);
-              const res = await fetch(urlMatch[1]);
+              console.log(`  ↳ [Tabular Interceptor] Fetching Response_URL: ${responseUrl}`);
+              const res = await fetch(responseUrl);
               if (res.ok) {
                 data = await res.json();
                 if (typeof data === "string") {

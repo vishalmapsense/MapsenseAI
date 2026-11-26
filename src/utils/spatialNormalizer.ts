@@ -207,15 +207,30 @@ export function normalizeToGeoJSON(rawData: any, defaultLabel: string = "Spatial
   }
 
   // 5. Bare GeoJSON Geometry ({ type: "LineString" | "Polygon" | "Point", coordinates: [...] })
+  //    Also handles Sequelize boundary rows ({ id, dtname, type: "MultiPolygon", coordinates: [...] }).
   const GEOM_TYPES = ["Point", "MultiPoint", "LineString", "MultiLineString", "Polygon", "MultiPolygon", "GeometryCollection"];
   if (data.type && GEOM_TYPES.includes(data.type)) {
+    const geometry =
+      data.type === "GeometryCollection"
+        ? { type: data.type, geometries: data.geometries }
+        : { type: data.type, coordinates: data.coordinates };
+    const { type: _geomType, coordinates: _coords, geometries: _geoms, ...restProps } = data;
     return {
       type: "FeatureCollection",
       features: [
         {
           type: "Feature",
-          geometry: data,
-          properties: { name: defaultLabel },
+          geometry,
+          properties: {
+            ...restProps,
+            name:
+              data.name ||
+              data.title ||
+              data.dtname ||
+              data.officeName ||
+              data.zipcode ||
+              defaultLabel,
+          },
         },
       ],
     };

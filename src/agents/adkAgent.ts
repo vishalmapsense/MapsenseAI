@@ -110,8 +110,8 @@ const PLAYGROUND_AGENT_SKILL =
   "   Example: get_zip_data(key='zipcode', value='208002,208003,110001') (IMPORTANT: Do NOT add spaces after commas).\n" +
   "\n" +
   "2. get_district_data — Fetch district boundary data.\n" +
-  "   You can fetch MULTIPLE districts at once by passing a comma-separated string in the 'dtname' field.\n" +
-  "   Example: get_district_data(dtname='Delhi,Lucknow,Kanpur') (IMPORTANT: Do NOT add spaces after commas).\n" +
+  "   - Single district: pass dtname (e.g. dtname='Kanpur Nagar') or id (UUID).\n" +
+  "   - Multiple districts: pass multipleDtnames as an array of strings (e.g. multipleDtnames=['Delhi', 'Lucknow', 'Kanpur']).\n" +
   "\n" +
   "3. get_user_layers — Fetch user's saved layers.\n" +
   "   - No params = all layers. id = single layer. originalLayerId = all versions.\n" +
@@ -446,7 +446,7 @@ const PLANNER_AGENT_SKILL =
   "       → ALWAYS duckdb_agent! (NEVER playground_agent, NEVER mapbox_agent). duckdb_agent executes run_client_duckdb_query directly in the user's browser.\n" +
   "   Q2: Does it need GEOGRAPHIC data (routes, distances, isochrones, geocoding)?\n" +
   "       → YES → mapbox_agent\n" +
-  "   Q3: Does it need PLATFORM data (zip boundaries, user layers, OSM queries)?\n" +
+  "   Q3: Does it need PLATFORM data (zip boundaries, district boundaries, user layers, OSM queries)?\n" +
   "       → YES → playground_agent\n" +
   "   Q4: Does user want to ANALYZE/QUERY a dataset, file, CSV, Parquet, or GeoJSON using DuckDB/SQL, or query map layers?\n" +
   "       → YES → duckdb_agent (duckdb_agent will automatically select run_client_duckdb_query for small/normal queries or run_duck_db_queries for heavy backend analysis)\n" +
@@ -1266,6 +1266,9 @@ export function createADKAgent(
         console.log(`  ↳ Fetching Response_URL: ${rawParsed._responseUrl}`);
         try {
           const fetchRes = await fetch(rawParsed._responseUrl);
+          if (!fetchRes.ok) {
+            throw new Error(`HTTP ${fetchRes.status} fetching Playg JSON`);
+          }
           let jsonData = await fetchRes.json();
           if (typeof jsonData === "string") {
             try {
@@ -1682,6 +1685,7 @@ export function createADKAgent(
   const mapboxAgent = new LlmAgent({
     model: modelToUse,
     name: "mapbox_agent",
+    disallowTransferToPeers: true,
     description:
       "Handles geocoding, place search, directions, isochrones, geometric computations, and all Mapbox spatial data.",
     instruction: `You are the Mapbox spatial data specialist. You search for places, geocode locations, compute geometry, and fetch spatial data using Mapbox MCP tools.
@@ -1690,7 +1694,7 @@ ${MAPBOX_AGENT_SKILL}
 
 AGENT BOUNDARY (CRITICAL — VIOLATION CAUSES SYSTEM CRASH):
 - You do NOT have access to ANY map_* client tools (map_rotate, map_zoom_in, map_zoom_out, map_fly_to, map_fit_bounds, map_set_base, map_clear_layers, map_add_marker, map_add_geojson, map_load_url, map_draw_*, map_edit_*, map_delete_*, map_select_layer, etc.).
-- You do NOT have access to playground tools (get_zip_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers).
+- You do NOT have access to playground tools (get_zip_data, get_district_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers).
 - NEVER call render_map_tool or attempt to render maps. You are a DATA specialist only. Spatial data returned by your tools is automatically extracted and displayed on the DeckGL map by the server.
 - NEVER attempt to call tools you don't have. If the user's request needs map UI actions (zoom, rotate, fly, draw), complete YOUR data work and return your summary. The planner will route map UI tasks to map_ui_agent separately.
 - If you accidentally try to call a tool you don't own, the system will crash with an error. This is YOUR fault — avoid it.
@@ -1699,7 +1703,7 @@ EXECUTION RULES:
 - Execute the requested tool(s) and return a clear technical summary with all geographic data found.
 - CRITICAL: If a tool returns a URI, URL, or data reference (e.g. Response_URL, mapbox://temp/...) for spatial data, DO NOT try to fetch, query, or read it yourself. Simply return the URL reference as it is to the parent.
 - DO NOT call render_map_tool. DO NOT attempt to render the map.
-- DO NOT generate a final user-facing response. DO NOT transfer to any other agent.
+- DO NOT generate a final user-facing response. DO NOT transfer to any peer agent (only return to planner_agent).
 - When you are DONE, simply return your summary — control will automatically go back to your parent agent.
 ${LANG_RULE}
 ${HITL_RULE}
@@ -1714,8 +1718,9 @@ ${AGENT_SAFETY_STAND_RULE}`,
   const playgroundAgent = new LlmAgent({
     model: modelToUse,
     name: "playground_agent",
+    disallowTransferToPeers: true,
     description:
-      "Handles Playground platform data: zip boundary data, user layers, OSM queries.",
+      "Handles Playground platform data: district boundary data, zip boundary data, user layers, OSM queries.",
     instruction: `You are the Playground/DTA platform data specialist. You fetch and manipulate platform-specific data.
 
 ${PLAYGROUND_AGENT_SKILL}
@@ -1726,10 +1731,17 @@ AGENT BOUNDARY (CRITICAL — VIOLATION CAUSES SYSTEM CRASH):
 - NEVER attempt to call tools you don't have. If the user's request needs map UI actions, complete YOUR data work and return your summary. The planner will route other tasks separately.
 - If you accidentally try to call a tool you don't own, the system will crash with an error. This is YOUR fault — avoid it.
 
+AUTH & ERROR HANDLING RULES (CRITICAL):
+- If any Playground tool fails with 401 / Unauthorized, ECONNREFUSED, or isError: true:
+  1. STOP immediately after at most 1 retry (ONLY retry once if the failure looks like a name typo, NEVER retry after a 401/Unauthorized or connection failure).
+  2. NEVER call unrelated tools like get_user_layers as a workaround for a 401 Unauthorized error on get_district_data / get_zip_data.
+  3. NEVER ask map_ui_agent to zoom/fly to coordinates as a substitute for failed boundary/layer data.
+  4. Transfer back to your parent ('planner_agent') or return the exact error summary stating the tool failed (e.g., "401 Unauthorized from Playg MCP server — unable to fetch boundary data").
+
 EXECUTION RULES:
 - Execute the requested tool(s) and return a clear technical summary with all data found.
-- CRITICAL: If a tool returns a URI, URL, or data reference (e.g. Response_URL), DO NOT try to fetch, query, or read it yourself (e.g., do not use DuckDB on it). Simply return the URL reference as it is to the parent.
-- DO NOT generate a final user-facing response. DO NOT transfer to any other agent.
+- CRITICAL: If a tool returns a URI, URL, or data reference (e.g. Response_URL or /api/get-json?key=...), DO NOT try to fetch, query, or read it yourself (e.g., do not use DuckDB on it). Simply return the URL reference as it is to the parent.
+- DO NOT generate a final user-facing response unless returning a blocking error summary. DO NOT transfer to any peer agent (only transfer back to planner_agent if needed).
 - When you are DONE, simply return your summary — control will automatically go back to your parent agent.
 ${LANG_RULE}
 ${HITL_RULE}
@@ -1744,6 +1756,7 @@ ${AGENT_SAFETY_STAND_RULE}`,
   const duckdbAgent = new LlmAgent({
     model: modelToUse,
     name: "duckdb_agent",
+    disallowTransferToPeers: true,
     description:
       "Handles spatial data analysis on user-provided files, URLs, or existing tables using DuckDB SQL queries.",
     instruction: `You are the DuckDB Spatial SQL analyst. You analyze data files, URLs, and tables using DuckDB SQL.
@@ -1789,6 +1802,7 @@ ${AGENT_SAFETY_STAND_RULE}`,
   const mapUiAgent = new LlmAgent({
     model: modelToUse,
     name: "map_ui_agent",
+    disallowTransferToPeers: true,
     description:
       "LocusScore & Map UI specialist: Computes PIN / ZIP code Location Intelligence & Livability scores across 8 OSM categories (Education, Healthcare, Daily Needs, F&B, Banking, Transit, Recreation, Civic) for Real Estate, FMCG / Retail, and Quick-Commerce via score_pincode_locus and compare_pincodes_locus_score, and controls map display (fly_to, zoom, draw, markers, layers, styles).",
     instruction: `You are the Map UI & LocusScore specialist. You calculate PIN code location intelligence (compare_pincodes_locus_score, score_pincode_locus) and execute map display actions using client-side tools.
@@ -1797,8 +1811,9 @@ ${MAP_UI_AGENT_SKILL}
 
 AGENT BOUNDARY (CRITICAL — VIOLATION CAUSES SYSTEM CRASH):
 - You do NOT have access to Mapbox MCP tools (search_and_geocode_tool, directions_tool, distance_tool, category_search_tool, etc.).
-- You do NOT have access to Playground tools (get_zip_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers). You have access to all client-side map tools and run_client_duckdb_query for in-browser SQL filtering and layer styling.
+- You do NOT have access to Playground tools (get_zip_data, get_district_data, get_osm_query, run_osm_query, run_duck_db_queries, get_user_layers). You have access to all client-side map tools and run_client_duckdb_query for in-browser SQL filtering and layer styling.
 - NEVER attempt to call tools you don't have. If you need spatial data or geocoded coordinates, return what's missing in your summary. The planner will route to the correct data agent.
+- If a previous Playground or Mapbox tool failed with an error (e.g. 401 Unauthorized, ECONNREFUSED, isError: true), DO NOT use map_fly_to or map_zoom_* with guessed coordinates as a fallback! Return an error summary stating the data could not be loaded.
 - If you accidentally try to call a tool you don't own, the system will crash with an error. This is YOUR fault — avoid it.
 
 EXECUTION RULES:
@@ -1824,6 +1839,7 @@ ${AGENT_SAFETY_STAND_RULE}`,
   const verifyingAgent = new LlmAgent({
     model: modelToUse,
     name: "verifying_agent",
+    disallowTransferToPeers: true,
     description:
       "Checks if all parts of the user's request were completed. Writes the final user response if done, or reports what is still pending.",
     instruction: `You are the Verifying Agent. You are called by planner_agent AFTER work agents have finished.
@@ -1838,17 +1854,18 @@ YOUR JOB:
 
 ERROR DETECTION (CRITICAL — CHECK THIS FIRST):
 - BEFORE reporting success, scan the ENTIRE conversation history for ANY of these error indicators:
-  • Messages containing "UNKNOWN_ERROR", "Error", "error", "BLOCKED", "REJECTED"
+  • Messages containing "UNKNOWN_ERROR", "Error", "error", "BLOCKED", "REJECTED", "Unauthorized", "401", "ECONNREFUSED"
   • Messages containing "is not found in the toolsDict" (means wrong agent was used)
   • Messages containing "EXECUTION BLOCKED" (means permission was needed but not granted)
-  • Any functionResponse with an error field or error status
-- If ANY error is found, you MUST mark the task as INCOMPLETE and specify:
+  • Any functionResponse with an error field, "isError": true, or error status
+- AUTH / BACKEND ERRORS (401 / Unauthorized / ECONNREFUSED): If the designated specialist (e.g., playground_agent) failed due to 401 Unauthorized or backend connection failure, DO NOT report INCOMPLETE to trigger retries or map_ui_agent zoom! Instead, respond directly and politely to the user explaining that the boundary/layer data could not be loaded because the Playground MCP service returned 401 Unauthorized / backend unavailable.
+- For tool-routing / missing-step errors, mark the task as INCOMPLETE and specify:
   • Which tool/action failed
   • What the error was
   • Which agent should handle it instead
   Example: "INCOMPLETE: mapbox_agent tried to call map_rotate but it doesn't have that tool. Need map_ui_agent to handle map rotation."
   Example: "INCOMPLETE: Tool call failed with error 'Function map_ui_agent:map_rotate is not found'. The map rotation task was NOT completed. Need planner to route to map_ui_agent."
-- NEVER report success when errors are present in the conversation. Even if SOME tasks succeeded, if ANY task has an error, report INCOMPLETE for the failed parts.
+- NEVER report success when errors are present in the conversation. Even if SOME tasks succeeded, if ANY task has an error, never claim it succeeded (unless explicitly handled above).
 
 IF EVERYTHING IS COMPLETE (AND NO ERRORS DETECTED):
 - Write a final, friendly, well-formatted response directly to the user summarizing what was done.
@@ -1936,13 +1953,13 @@ If verifying_agent responds with "INCOMPLETE: ...", read what's missing and rout
 Repeat until verifying_agent confirms everything is done.
 
 STEP 4 — ERROR RECOVERY & LOOP PREVENTION (CRITICAL):
-If a work agent returns an error like "Function X is not found in the toolsDict" or "UNKNOWN_ERROR":
-- LOOP PREVENTION: If the failing agent was ALREADY the designated specialist (e.g., mapbox_agent failed on a mapbox search tool, or playground_agent failed on a zip boundary tool), DO NOT transfer back to that same agent! That tool is unavailable. Stop immediately and explain to the user in a short polite message that the service or tool is currently unavailable. NEVER retry the same failing tool in a loop.
+If a work agent returns an error like "Function X is not found in the toolsDict", "UNKNOWN_ERROR", "401", "Unauthorized", or "isError: true":
+- LOOP PREVENTION & AUTH/BACKEND FAILURES: If the failing agent was ALREADY the designated specialist (e.g., mapbox_agent failed on a mapbox search tool, or playground_agent failed on get_district_data/get_zip_data/get_user_layers with 401 Unauthorized or connection error), DO NOT transfer back to that same agent AND DO NOT route to map_ui_agent to zoom/fly as a workaround! Stop immediately and explain clearly to the user why the data could not be loaded (e.g., Playg MCP returned 401 Unauthorized / token mismatch or backend unavailable). NEVER retry the same failing tool in a loop.
 - If the task was sent to the WRONG agent, route to the CORRECT agent once:
   * Failed tool is score_pincode_locus or compare_pincodes_locus_score → Route to map_ui_agent
   * Failed tool starts with map_* (map_rotate, map_zoom, map_fly_to, etc.) → Route to map_ui_agent
   * Failed tool is an MCP tool (search_*, directions_*, distance_*, category_*) → Route to mapbox_agent (ONLY if mapbox_agent has not already failed on it)
-  * Failed tool is a platform tool (get_zip_*, get_osm_*, get_user_*) → Route to playground_agent (ONLY if playground_agent has not already failed on it)
+  * Failed tool is a platform tool (get_zip_*, get_district_*, get_osm_*, get_user_*) → Route to playground_agent (ONLY if playground_agent has not already failed on it)
   * Failed tool is run_duck_db_queries or run_client_duckdb_query → Route to duckdb_agent (ONLY if duckdb_agent has not already failed on it)
 After re-routing, verify again with verifying_agent. Never attempt more than 1 re-route per message.
 ${LANG_RULE}

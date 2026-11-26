@@ -1,4 +1,5 @@
 import { PLAYG_MCP_CONFIG } from "@/config/mcp.config";
+import { extractPlaygResponseUrl } from "@/agents/utils/spatialDataInterceptor";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -124,10 +125,7 @@ export async function callPlaygTool(
 }
 
 export async function fetchPlaygJson(urlOrResponseText: string): Promise<any> {
-  let url = urlOrResponseText;
-  if (url.includes("Response_URL: ")) {
-    url = url.split("Response_URL: ")[1].trim();
-  }
+  const url = extractPlaygResponseUrl(urlOrResponseText) ?? urlOrResponseText.trim();
   const token =
     process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || "";
 
