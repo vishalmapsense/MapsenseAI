@@ -24,6 +24,10 @@ import {
 import { callMCPProcess } from "@/app/api/mcp/handlers/mapboxHandler";
 import { grantKey, GUARDED_TOOLS, resetToolCallCounters } from "@/agents/utils/toolGuardrail";
 import { SupabaseSessionService } from "@/services/supabaseSessionService";
+import { ADK_STREAM_EVENT, getAdkStreamChannelName } from "@/lib/adkStreamProtocol";
+
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const createMcpResourceResolver = (mcpToolsetRef?: any) => async (uri: string) => {
   try {
@@ -187,7 +191,14 @@ export async function POST(req: NextRequest) {
     });
   }
 
-  const { messages, apiKey, modelId, provider, sessionId: requestedSessionId } = bodyData;
+  const {
+    messages,
+    apiKey,
+    modelId,
+    provider,
+    sessionId: requestedSessionId,
+    requestId,
+  } = bodyData;
   if (!messages || messages.length === 0) {
     return new Response(JSON.stringify({ error: "Missing messages" }), {
       status: 400,
@@ -233,10 +244,36 @@ export async function POST(req: NextRequest) {
   const lastMessage = messages[messages.length - 1].content;
   const userContent = createUserContent(lastMessage);
 
+  const realtimeChannel =
+    typeof requestId === "string" && requestId.trim()
+      ? supabase.channel(getAdkStreamChannelName(requestId.trim()))
+      : null;
+
   const stream = new ReadableStream({
     async start(controller) {
+      let eventSeq = 0;
+      let broadcastChain: Promise<unknown> = Promise.resolve();
+
       const sendEvent = (data: any) => {
-        controller.enqueue(encoder.encode(JSON.stringify(data) + "\n"));
+        const payload = { ...data, seq: ++eventSeq };
+        controller.enqueue(encoder.encode(JSON.stringify(payload) + "\n"));
+
+        // Mirror live progress events via Supabase Realtime HTTP Broadcast so
+        // platforms that buffer SSR HTTP streams (like AWS Amplify Hosting)
+        // still push real-time status, agent_event, and stream chunks to the client.
+        if (realtimeChannel && data?.type !== "result") {
+          const serialized = JSON.stringify(payload);
+          if (serialized.length < 200_000) {
+            broadcastChain = broadcastChain
+              .then(() => realtimeChannel.httpSend(ADK_STREAM_EVENT, payload))
+              .catch((broadcastErr: any) => {
+                console.warn(
+                  "⚠️ [ADK Route] Realtime broadcast failed:",
+                  broadcastErr?.message || broadcastErr,
+                );
+              });
+          }
+        }
       };
 
       let mcpToolsetRef: any = null;
@@ -1095,6 +1132,15 @@ export async function POST(req: NextRequest) {
           message: err.message || "Internal Server Error",
         });
       } finally {
+        if (realtimeChannel) {
+          try {
+            await Promise.race([
+              broadcastChain,
+              new Promise((resolve) => setTimeout(resolve, 1500)),
+            ]);
+            await supabase.removeChannel(realtimeChannel);
+          } catch {}
+        }
         if (mcpToolsetRef) {
           try {
             await mcpToolsetRef.close();
@@ -1109,8 +1155,9 @@ export async function POST(req: NextRequest) {
 
   return new Response(stream, {
     headers: {
-      "Content-Type": "application/x-ndjson",
-      "Cache-Control": "no-cache",
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "X-Accel-Buffering": "no",
     },
   });
 }
