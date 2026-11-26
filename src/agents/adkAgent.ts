@@ -8,7 +8,7 @@ import {
 } from "@google/adk";
 import { ALL_CLIENT_TOOLS } from "@/config/clientTools";
 import { convertParametersToZod } from "./utils/zodMapper";
-import { MAPBOX_MCP_CONFIG } from "@/config/mcp.config";
+import { MAPBOX_MCP_CONFIG, PLAYG_MCP_CONFIG } from "@/config/mcp.config";
 import {
   extractSpatialFromResponse,
   extractMetadata,
@@ -1066,77 +1066,162 @@ export function createADKAgent(
     },
   );
 
-  // 3. Set up the Playg MCP Toolsets
-  class SafeDuckDbPlaygMCPToolset extends MCPToolset {
-    override async getTools(context?: any) {
-      try {
-        const tools = await super.getTools(context);
-        return sanitizeMcpToolsForGemini(tools);
-      } catch (err: any) {
-        console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for DuckDB:", err?.message || err);
-        return [];
+  // 3. Set up the Playg MCP Toolsets (Hosted StreamableHTTP primary + Stdio fallback)
+  class DynamicPlaygMCPToolset extends MCPToolset {
+    private disallowed: Set<string>;
+    private label: string;
+    private enabled: boolean;
+    private fallbackToolset?: MCPToolset;
+    private cachedTools: any[] | null = null;
+
+    constructor(
+      primaryParams: any,
+      fallbackParams?: any,
+      disallowed: string[] = [],
+      label = "Playg",
+      enabled = true,
+    ) {
+      super(primaryParams);
+      this.disallowed = new Set(disallowed);
+      this.label = label;
+      this.enabled = enabled;
+      if (fallbackParams) {
+        this.fallbackToolset = new MCPToolset(fallbackParams);
       }
+    }
+
+    private filterAndCache(tools: any[]): any[] {
+      const filtered =
+        this.disallowed.size > 0
+          ? tools.filter((t: any) => !this.disallowed.has(t.name))
+          : tools;
+      const sanitized = sanitizeMcpToolsForGemini(filtered);
+      this.cachedTools = sanitized;
+      return sanitized;
+    }
+
+    override async getTools(context?: any) {
+      if (!this.enabled) return [];
+      if (this.cachedTools && this.cachedTools.length > 0) {
+        return this.cachedTools;
+      }
+
+      // 1. Try Primary connection (Hosted endpoint when PLAYG_MCP_URL is configured, else stdio)
+      try {
+        console.log(`[Playg MCP - ${this.label}] Connecting...`);
+        const tools = await super.getTools(context);
+        if (tools && tools.length > 0) {
+          const result = this.filterAndCache(tools);
+          console.log(
+            `✅ [Playg MCP - ${this.label}] Connected successfully! Loaded ${result.length} tools:`,
+            result.map((t: any) => t.name).join(", "),
+          );
+          return result;
+        }
+      } catch (err: any) {
+        console.warn(
+          `⚠️ [Playg MCP - ${this.label}] Primary connection failed:`,
+          err?.message || err,
+        );
+      }
+
+      // 2. Fallback to stdio if configured
+      if (this.fallbackToolset) {
+        try {
+          console.log(`[Playg MCP - ${this.label}] Falling back to stdio process...`);
+          const fallbackTools = await this.fallbackToolset.getTools(context);
+          if (fallbackTools && fallbackTools.length > 0) {
+            const result = this.filterAndCache(fallbackTools);
+            console.log(
+              `✅ [Playg MCP - ${this.label}] Stdio fallback connected! Loaded ${result.length} tools:`,
+              result.map((t: any) => t.name).join(", "),
+            );
+            return result;
+          }
+        } catch (fbErr: any) {
+          console.error(
+            `❌ [Playg MCP - ${this.label}] Both primary and stdio fallback failed:`,
+            fbErr?.message || fbErr,
+          );
+        }
+      }
+
+      return [];
     }
   }
 
+  const playgHostedUrl =
+    process.env.PLAYG_MCP_URL ?? PLAYG_MCP_CONFIG.hostedUrl;
   const defaultPlaygScriptPath =
-    process.env.PLAYG_MCP_SCRIPT_PATH || "";
-  const defaultPlaygApiBase = process.env.PLAYG_API_BASE || "http://localhost:8000";
+    process.env.PLAYG_MCP_SCRIPT_PATH || PLAYG_MCP_CONFIG.serverScriptPath;
+  const defaultPlaygApiBase =
+    process.env.PLAYG_API_BASE || PLAYG_MCP_CONFIG.apiBase;
   const defaultPlaygRedisUrl =
-    process.env.PLAYG_REDIS_URL || process.env.REDIS_URL || "redis://localhost:6379";
+    process.env.PLAYG_REDIS_URL || process.env.REDIS_URL || PLAYG_MCP_CONFIG.redisUrl;
   const defaultPlaygBearerToken =
-    process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || "";
+    process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || PLAYG_MCP_CONFIG.bearerToken;
 
-  const playgMcpToolset = new SafeDuckDbPlaygMCPToolset({
-    type: "StdioConnectionParams",
-    serverParams: {
-      command: "node",
-      args: [defaultPlaygScriptPath],
-      env: {
-        ...process.env,
-        PLAYG_API_BASE: defaultPlaygApiBase,
-        USER_AGENT: process.env.PLAYG_USER_AGENT || "playg-mcp-server/1.0",
-        REDIS_URL: defaultPlaygRedisUrl,
-        BEARER_TOKEN: defaultPlaygBearerToken,
-        INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
-        FILE_PATH: "",
-      } as Record<string, string>,
-    },
-  });
+  const playgHttpParams = playgHostedUrl
+    ? {
+        type: "StreamableHTTPConnectionParams" as const,
+        url: playgHostedUrl,
+        transportOptions: {
+          requestInit: {
+            headers: {
+              Accept: "application/json, text/event-stream",
+              "Content-Type": "application/json",
+              ...(defaultPlaygBearerToken
+                ? { Authorization: `Bearer ${defaultPlaygBearerToken}` }
+                : {}),
+            },
+          },
+        },
+      }
+    : null;
+
+  const playgStdioParams = defaultPlaygScriptPath
+    ? {
+        type: "StdioConnectionParams" as const,
+        serverParams: {
+          command: "node",
+          args: [defaultPlaygScriptPath],
+          env: {
+            ...process.env,
+            PLAYG_API_BASE: defaultPlaygApiBase,
+            USER_AGENT: process.env.PLAYG_USER_AGENT || "playg-mcp-server/1.0",
+            REDIS_URL: defaultPlaygRedisUrl,
+            BEARER_TOKEN: defaultPlaygBearerToken,
+            INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
+            FILE_PATH: "",
+          } as Record<string, string>,
+        },
+      }
+    : null;
+
+  const primaryPlaygParams = playgHttpParams ||
+    playgStdioParams || {
+      type: "StdioConnectionParams" as const,
+      serverParams: { command: "node", args: [""] },
+    };
+  const fallbackPlaygParams = playgHttpParams ? playgStdioParams : undefined;
+  const isPlaygEnabled = Boolean(playgHttpParams || playgStdioParams);
+
+  const playgMcpToolset = new DynamicPlaygMCPToolset(
+    primaryPlaygParams,
+    fallbackPlaygParams,
+    [],
+    "DuckDB",
+    isPlaygEnabled,
+  );
 
   // Filtered Playg toolset for playground_agent (removes run_duck_db_queries so it never attempts backend SQL)
-  class FilteredPlaygMCPToolset extends MCPToolset {
-    private disallowed = new Set(["run_duck_db_queries"]);
-
-    override async getTools(context?: any) {
-      try {
-        const tools = await super.getTools(context);
-        return sanitizeMcpToolsForGemini(
-          tools.filter((t: any) => !this.disallowed.has(t.name)),
-        );
-      } catch (err: any) {
-        console.warn("⚠️ [ADK Agent] Failed to load Playg MCP tools for Playground:", err?.message || err);
-        return [];
-      }
-    }
-  }
-
-  const playgroundMcpToolset = new FilteredPlaygMCPToolset({
-    type: "StdioConnectionParams",
-    serverParams: {
-      command: "node",
-      args: [defaultPlaygScriptPath],
-      env: {
-        ...process.env,
-        PLAYG_API_BASE: defaultPlaygApiBase,
-        USER_AGENT: process.env.PLAYG_USER_AGENT || "playg-mcp-server/1.0",
-        REDIS_URL: defaultPlaygRedisUrl,
-        BEARER_TOKEN: defaultPlaygBearerToken,
-        INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
-        FILE_PATH: "",
-      } as Record<string, string>,
-    },
-  });
+  const playgroundMcpToolset = new DynamicPlaygMCPToolset(
+    primaryPlaygParams,
+    fallbackPlaygParams,
+    ["run_duck_db_queries"],
+    "Playground",
+    isPlaygEnabled,
+  );
 
   const effectiveApiKey =
     (apiKey && apiKey.trim()) || process.env.GEMINI_API_KEY;
