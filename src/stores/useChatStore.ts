@@ -15,6 +15,7 @@ import { useMapStore } from "./useMapStore";
 import { executeClientCommands } from "@/lib/mapExecutor";
 import { fetchSessionLayers, deleteAllLayers, setSessionLayersCache } from "@/services/layerSyncService";
 import { queryResultService } from "@/services/queryResultService";
+import { streamAdkChat } from "@/lib/adkStreamClient";
 
 export interface ChatSession {
   id: string;
@@ -426,10 +427,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         return { role: m.role, content: m.content };
       });
       
-      const response = await fetch("/api/adk-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const finalData = await streamAdkChat({
+        payload: {
           messages: conversationHistory,
           sessionId: get().activeSessionId,
           modelId: model.id,
@@ -438,102 +437,50 @@ export const useChatStore = create<ChatState>((set, get) => {
           userLocation: get().userLocation,
           mapViewState: useMapStore.getState().mapViewState,
           baseMap: useMapStore.getState().baseMap,
-        }),
+        },
+        defaultHttpError: "Failed to get response from AI",
+        onHttpErrorToast: (apiError) => toast.error(`Error: ${apiError}`),
+        onStatus: (message) => {
+          set((state) => {
+            const newState = {
+              ...state,
+              messages: state.messages.map((m) =>
+                m.id === loadingMessage.id
+                  ? { ...m, statusMessage: message }
+                  : m
+              ),
+            };
+            return { ...newState, ...syncSession(newState) };
+          });
+        },
+        onStream: (chunk) => {
+          set((state) => {
+            const newState = {
+              ...state,
+              messages: state.messages.map((m) =>
+                m.id === loadingMessage.id
+                  ? { ...m, content: m.content + chunk }
+                  : m
+              ),
+            };
+            return { ...newState, ...syncSession(newState) };
+          });
+        },
+        onAgentEvent: (evt) => {
+          console.log("AGENT EVENT RECEIVED:", evt);
+          set((state) => {
+            const newState = {
+              ...state,
+              messages: state.messages.map((m) =>
+                m.id === loadingMessage.id
+                  ? { ...m, agentEvents: [...(m.agentEvents || []), evt] }
+                  : m
+              ),
+            };
+            return { ...newState, ...syncSession(newState) };
+          });
+        },
       });
-
-      if (!response.ok) {
-        let apiError = "Failed to get response from AI";
-        try {
-          const errorData = await response.json();
-          if (errorData.error) apiError = errorData.error;
-        } catch (e) {}
-        toast.error(`Error: ${apiError}`);
-        throw new Error(apiError);
-      }
-
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finalData: any = null;
-      let streamError: string | null = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          
-          let event;
-          try {
-            event = JSON.parse(line);
-          } catch (e) {
-            console.error("Failed to parse stream event:", line, e);
-            continue;
-          }
-            
-          if (event.type === "status") {
-            set((state) => {
-              const newState = {
-                ...state,
-                messages: state.messages.map((m) =>
-                  m.id === loadingMessage.id
-                    ? { ...m, statusMessage: event.message }
-                    : m
-                ),
-              };
-              return { ...newState, ...syncSession(newState) };
-            });
-          } else if (event.type === "stream") {
-            set((state) => {
-              const newState = {
-                ...state,
-                messages: state.messages.map((m) =>
-                  m.id === loadingMessage.id
-                    ? { ...m, content: m.content + event.message }
-                    : m
-                ),
-              };
-              return { ...newState, ...syncSession(newState) };
-            });
-          } else if (event.type === "agent_event") {
-            console.log("AGENT EVENT RECEIVED:", event);
-            set((state) => {
-              const newState = {
-                ...state,
-                messages: state.messages.map((m) =>
-                  m.id === loadingMessage.id
-                    ? { ...m, agentEvents: [...(m.agentEvents || []), event.event] }
-                    : m
-                ),
-              };
-              return { ...newState, ...syncSession(newState) };
-            });
-          } else if (event.type === "result") {
-            finalData = event.data;
-          } else if (event.type === "error") {
-            streamError = event.message;
-            break;
-          }
-        }
-
-        if (streamError) break;
-      }
-
-      if (streamError) {
-        throw new Error(streamError);
-      }
-
-      if (!finalData) {
-        throw new Error("Did not receive final result from server.");
-      }
 
       // Show agent-level errors as distinct toast notifications
       if (finalData.errors && Array.isArray(finalData.errors) && finalData.errors.length > 0) {
@@ -1368,10 +1315,8 @@ export const useChatStore = create<ChatState>((set, get) => {
         return { role: m.role, content: m.content };
       });
 
-      const response = await fetch("/api/adk-chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      const finalData = await streamAdkChat({
+        payload: {
           messages: conversationHistory,
           sessionId: get().activeSessionId,
           modelId: model.id,
@@ -1380,77 +1325,41 @@ export const useChatStore = create<ChatState>((set, get) => {
           userLocation: get().userLocation,
           mapViewState: useMapStore.getState().mapViewState,
           baseMap: useMapStore.getState().baseMap,
-        }),
+        },
+        defaultHttpError: "Failed to get response",
+        onStatus: (message) => {
+          set((state) => ({
+            mapSqlChat: {
+              ...state.mapSqlChat,
+              messages: state.mapSqlChat.messages.map((m) =>
+                m.id === loadingMessage.id ? { ...m, statusMessage: message } : m
+              ),
+            },
+          }));
+        },
+        onStream: (chunk) => {
+          set((state) => ({
+            mapSqlChat: {
+              ...state.mapSqlChat,
+              messages: state.mapSqlChat.messages.map((m) =>
+                m.id === loadingMessage.id ? { ...m, content: m.content + chunk } : m
+              ),
+            },
+          }));
+        },
+        onAgentEvent: (evt) => {
+          set((state) => ({
+            mapSqlChat: {
+              ...state.mapSqlChat,
+              messages: state.mapSqlChat.messages.map((m) =>
+                m.id === loadingMessage.id
+                  ? { ...m, agentEvents: [...(m.agentEvents || []), evt] }
+                  : m
+              ),
+            },
+          }));
+        },
       });
-
-      if (!response.ok) {
-        let apiError = "Failed to get response";
-        try { const d = await response.json(); if (d.error) apiError = d.error; } catch {}
-        throw new Error(apiError);
-      }
-
-      if (!response.body) throw new Error("No response body");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let finalData: any = null;
-      let streamError: string | null = null;
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          let event;
-          try { event = JSON.parse(line); } catch { continue; }
-
-          if (event.type === "stream") {
-            set((state) => ({
-              mapSqlChat: {
-                ...state.mapSqlChat,
-                messages: state.mapSqlChat.messages.map((m) =>
-                  m.id === loadingMessage.id ? { ...m, content: m.content + event.message } : m
-                ),
-              },
-            }));
-          } else if (event.type === "status") {
-            set((state) => ({
-              mapSqlChat: {
-                ...state.mapSqlChat,
-                messages: state.mapSqlChat.messages.map((m) =>
-                  m.id === loadingMessage.id ? { ...m, statusMessage: event.message } : m
-                ),
-              },
-            }));
-          } else if (event.type === "agent_event") {
-            set((state) => ({
-              mapSqlChat: {
-                ...state.mapSqlChat,
-                messages: state.mapSqlChat.messages.map((m) =>
-                  m.id === loadingMessage.id
-                    ? { ...m, agentEvents: [...(m.agentEvents || []), event.event] }
-                    : m
-                ),
-              },
-            }));
-          } else if (event.type === "result") {
-            finalData = event.data;
-          } else if (event.type === "error") {
-            streamError = event.message;
-            break;
-          }
-        }
-        if (streamError) break;
-      }
-
-      if (streamError) throw new Error(streamError);
-      if (!finalData) throw new Error("No result received.");
 
       // Execute client commands if any
       if (finalData.clientToolCommands?.length > 0) {
