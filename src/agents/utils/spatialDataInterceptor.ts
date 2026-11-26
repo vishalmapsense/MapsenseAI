@@ -132,6 +132,28 @@ export function createLightweightSummary(
 }
 
 /**
+ * Extracts Playg response URLs from both legacy stdio output
+ * ("Response_URL: <url>") and hosted HTTP playg-mcp output
+ * ("Fetched ... successfully: https://.../api/get-json?key=...").
+ */
+export function extractPlaygResponseUrl(text: string): string | null {
+  const legacyMatch = text.match(/Response_URL:\s*(https?:\/\/[^\s"']+)/i);
+  if (legacyMatch?.[1]) return legacyMatch[1];
+
+  const getJsonMatch = text.match(/(https?:\/\/[^\s"']*\/api\/get-json\?[^\s"']+)/i);
+  if (getJsonMatch?.[1]) return getJsonMatch[1];
+
+  const msgUrlMatch = text.match(
+    /(?:Fetched|Executed|Saved|Query)[^:\n]*:\s*(https?:\/\/[^\s"']+)/i,
+  );
+  if (msgUrlMatch?.[1] && !msgUrlMatch[1].includes("api.mapbox.com")) {
+    return msgUrlMatch[1];
+  }
+
+  return null;
+}
+
+/**
  * Checks if a raw MCP tool response contains spatial data that should be
  * intercepted, extracted, and bypassed from the LLM.
  *
@@ -142,6 +164,9 @@ export function extractSpatialFromResponse(
   rawResponse: any,
 ): { normalized: any; rawParsed: any } | null {
   if (!rawResponse || typeof rawResponse !== "object") return null;
+
+  // Skip MCP error payloads so error JSON isn't parsed as spatial data
+  if (rawResponse.isError === true) return null;
 
   // ── Case 0: structuredContent (MCP structured output) ──
   if (rawResponse.structuredContent) {
@@ -182,15 +207,13 @@ export function extractSpatialFromResponse(
       if (block.type === "text" && typeof block.text === "string") {
         const trimmed = block.text.trim();
 
-        // Check for Response_URL pattern (Playground tools)
-        const responseUrlMatch = trimmed.match(
-          /Response_URL:\s*(https?:\/\/[^\s"']+)/,
-        );
-        if (responseUrlMatch) {
+        // Check for Response_URL / Playg responseURL pattern (Playground tools)
+        const playgResponseUrl = extractPlaygResponseUrl(trimmed);
+        if (playgResponseUrl) {
           // We can't do async fetch inside a sync check — return a special marker
           return {
             normalized: null,
-            rawParsed: { _responseUrl: responseUrlMatch[1], _needsFetch: true },
+            rawParsed: { _responseUrl: playgResponseUrl, _needsFetch: true },
           };
         }
 
