@@ -29,6 +29,49 @@ import { ADK_STREAM_EVENT, getAdkStreamChannelName } from "@/lib/adkStreamProtoc
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
+const PLAYGROUND_TOOL_NAMES = new Set([
+  "get_zip_data",
+  "get_district_data",
+  "get_user_layers",
+  "get_osm_query",
+  "run_osm_query",
+]);
+
+const DUCKDB_TOOL_NAMES = new Set([
+  "run_duck_db_queries",
+  "run_client_duckdb_query",
+  "map_style_layer",
+  "map_clear_layer_style",
+]);
+
+function extractMissingToolFromError(msg: string): string | null {
+  const match = msg.match(/Function\s+([^\s]+)\s+is not found in the toolsDict/i);
+  return match?.[1] ?? null;
+}
+
+function isDesignatedToolOwner(agentName: string, toolName: string | null): boolean {
+  if (!agentName || !toolName) return false;
+  if (agentName === "playground_agent") return PLAYGROUND_TOOL_NAMES.has(toolName);
+  if (agentName === "duckdb_agent") return DUCKDB_TOOL_NAMES.has(toolName);
+  if (agentName === "map_ui_agent") {
+    return (
+      toolName.startsWith("map_") ||
+      toolName === "score_pincode_locus" ||
+      toolName === "compare_pincodes_locus_score"
+    );
+  }
+  if (agentName === "mapbox_agent") {
+    return (
+      !PLAYGROUND_TOOL_NAMES.has(toolName) &&
+      !DUCKDB_TOOL_NAMES.has(toolName) &&
+      !toolName.startsWith("map_") &&
+      toolName !== "score_pincode_locus" &&
+      toolName !== "compare_pincodes_locus_score"
+    );
+  }
+  return false;
+}
+
 const createMcpResourceResolver = (mcpToolsetRef?: any) => async (uri: string) => {
   try {
     console.log("🔍 [ADK Route] Resolving MCP resource URI:", uri);
@@ -422,6 +465,8 @@ export async function POST(req: NextRequest) {
         let currentInput: any | undefined = userContent;
         let retryCount = 0;
         const maxRetries = 2;
+        let fatalToolUnavailable = false;
+        let lastActiveAgent = "unknown_agent";
 
         while (true) {
           let routingErrorDetected = false;
@@ -442,6 +487,9 @@ export async function POST(req: NextRequest) {
           }
 
           const agentName = event.author;
+          if (agentName && agentName !== "user") {
+            lastActiveAgent = agentName;
+          }
 
           console.log(
             `\n======================================================`,
@@ -743,15 +791,22 @@ export async function POST(req: NextRequest) {
           // Capture and stream agent-level errors (e.g., 429 Quota Exceeded, wrong-agent tool calls)
           const evt = event as any;
           if (evt.errorMessage) {
-            const errorCode = evt.errorCode || "UNKNOWN_ERROR";
+            let errorCode = evt.errorCode || "UNKNOWN_ERROR";
             console.error(
               `⚠️ [ADK Route] Agent Error from '${agentName}' (${errorCode}): ${evt.errorMessage}`,
             );
 
             if (evt.errorMessage.includes("is not found in the toolsDict")) {
-              routingErrorDetected = true;
-              failedAgent = agentName || "unknown_agent";
-              failedMessage = evt.errorMessage;
+              const missingTool = extractMissingToolFromError(evt.errorMessage);
+              if (agentName && isDesignatedToolOwner(agentName, missingTool)) {
+                // Specialist already owns this tool, so MCP failed to load it — do NOT re-route/retry
+                fatalToolUnavailable = true;
+                errorCode = "TOOL_UNAVAILABLE";
+              } else {
+                routingErrorDetected = true;
+                failedAgent = agentName || "unknown_agent";
+                failedMessage = evt.errorMessage;
+              }
             }
 
             // Track error separately — don't pollute the success response text
@@ -772,6 +827,10 @@ export async function POST(req: NextRequest) {
                 errorMessage: evt.errorMessage,
               },
             });
+
+            if (fatalToolUnavailable) {
+              break;
+            }
           }
 
           if (event.usageMetadata && agentName && agentName !== "user") {
@@ -804,15 +863,46 @@ export async function POST(req: NextRequest) {
             if (errMsg.includes("model output") || errMsg.includes("both be empty") || errMsg.includes("cannot both be empty")) {
               emptyOutputErrorDetected = true;
               console.warn(`⚠️ [ADK Route] Empty model output detected — will retry if retries remain.`);
+            } else if (errMsg.includes("is not found in the toolsDict")) {
+              const missingTool = extractMissingToolFromError(errMsg);
+              const errCode = isDesignatedToolOwner(lastActiveAgent, missingTool)
+                ? "TOOL_UNAVAILABLE"
+                : "RUNNER_ERROR";
+              if (errCode === "TOOL_UNAVAILABLE") {
+                fatalToolUnavailable = true;
+              } else {
+                routingErrorDetected = true;
+                failedAgent = lastActiveAgent;
+                failedMessage = errMsg;
+              }
+              agentErrors.push({
+                agent: lastActiveAgent,
+                code: errCode,
+                message: errMsg.substring(0, 300),
+              });
+              sendEvent({
+                type: "agent_event",
+                event: {
+                  agentName: lastActiveAgent,
+                  type: "error",
+                  description: `❌ Error: ${errMsg.substring(0, 120)}`,
+                  errorCode: errCode,
+                  errorMessage: errMsg,
+                },
+              });
             } else {
               // For other thrown errors, track and break
               agentErrors.push({
-                agent: "adk_runner",
+                agent: lastActiveAgent || "adk_runner",
                 code: "RUNNER_ERROR",
                 message: errMsg.substring(0, 300),
               });
             }
           }
+
+        if (fatalToolUnavailable) {
+          break;
+        }
 
         if ((routingErrorDetected || emptyOutputErrorDetected) && retryCount < maxRetries) {
           retryCount++;
@@ -845,6 +935,55 @@ export async function POST(req: NextRequest) {
           break;
         }
       } // end while
+
+      // ─── Deterministic Zero-Hallucination Guard ───────────────────────────
+      // If a required specialist tool failed (e.g. missing in toolsDict or 401)
+      // and NO spatial/tabular/data tool succeeded, discard any LLM-hallucinated
+      // coordinates or fake "route displayed" claims.
+      const CAMERA_UI_TOOLS = new Set([
+        "transfer_to_agent",
+        "map_fly_to",
+        "map_fit_bounds",
+        "map_zoom_in",
+        "map_zoom_out",
+        "map_set_zoom",
+        "map_rotate",
+        "map_reset_rotation",
+      ]);
+      const hasSuccessfulDataTool = toolCallsMade.some(
+        (t) =>
+          t.result != null &&
+          !(t.result as any)?.isError &&
+          !CAMERA_UI_TOOLS.has(String(t.toolName || "")),
+      );
+      const hasBlockingToolError =
+        fatalToolUnavailable ||
+        agentErrors.some(
+          (e) =>
+            e.code === "TOOL_UNAVAILABLE" ||
+            e.message.includes("is not found in the toolsDict") ||
+            e.message.includes("Unauthorized") ||
+            e.message.includes("401"),
+        );
+
+      if (
+        hasBlockingToolError &&
+        !hasSuccessfulDataTool &&
+        spatialDataBuffer.length === 0 &&
+        tabularDataBuffer.length === 0
+      ) {
+        const loadDetail = (mcpToolsetRef as any)?.lastLoadError
+          ? `\n\n**Diagnostic:** ${(mcpToolsetRef as any).lastLoadError}`
+          : "";
+        const errorLines = agentErrors
+          .map((e) => `- **${e.agent}**: ${e.message}`)
+          .join("\n");
+        finalResponseText =
+          `⚠️ **Unable to complete your request — required spatial/data tool could not be executed.**\n\n` +
+          `${errorLines}${loadDetail}\n\n` +
+          `No location, route, or map layer was fetched or rendered.`;
+        clientToolCommands.length = 0;
+      }
 
       // ─── Process Spatial Data Buffer (from afterToolCallback interception) ───
         // This data was extracted at the agent level and never went through the LLM.

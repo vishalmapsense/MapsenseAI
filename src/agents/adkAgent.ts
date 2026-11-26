@@ -514,9 +514,14 @@ const VERIFYING_AGENT_SKILL =
   "2. Was Response_URL returned as-is (not fetched/queried by the agent)?\n" +
   "3. If map display was needed, did map_ui_agent execute it? If user attached files ([ATTACHED_LOCAL_FILES]), did map_ui_agent load all of them?\n" +
   "4. Were ALL parts of the user's request addressed? (e.g., user asked for BOTH search + zoom, or multiple files, or area calculation)\n" +
-  "5. Were coordinates geocoded, not guessed?\n" +
+  "5. Were coordinates geocoded from actual tool output, NEVER guessed or recalled from memory?\n" +
   "6. For SQL / layer queries: was run_client_duckdb_query executed so results show in the query panel, and was a clear 1-2 sentence summary provided? (Never say table does not exist or ask to re-fetch boundary data)\n" +
   "7. For Layer Styling & Visualization (map_style_layer): Did the agent report the EXACT layer type (e.g. GeoJsonLayer, HeatmapLayer, HexagonLayer) and the EXACT colors/mapping applied to the map? The reported colors and layer type in chat MUST 100% match what was passed in the map_style_layer tool call — ZERO COLOR HALLUCINATION.\n" +
+  "\n" +
+  "STRICT ZERO-HALLUCINATION GATE:\n" +
+  "   ❌ NEVER output lat/lng coordinates, routes, distances, ETAs, or claim 'Displayed on map' / 'route layer' from AI training memory when no tool succeeded.\n" +
+  "   ❌ NEVER generate tables or coordinate pairs from general knowledge. Every coordinate/route MUST come verbatim from an executed, non-error tool call in the current turn.\n" +
+  "   ❌ If search_and_geocode_tool / directions_tool / get_zip_data / get_district_data failed ('not found in the toolsDict', 401, Error), DO NOT report success or give coordinates — report clearly that the tool failed and no map action occurred.\n" +
   "\n" +
   "RESPONSE FORMAT RULES:\n" +
   "   - Multiple places found / Ambiguous locations → List the candidate places with city/state/country context and ALWAYS append `[OPTION: <place name>]` chips for each option so the user can click them directly in chat.\n" +
@@ -965,12 +970,19 @@ export function createADKAgent(
     private disallowed = new Set(["render_map_tool", "static_map_image_tool"]);
     private fallbackToolset?: MCPToolset;
     private cachedTools: any[] | null = null;
+    private hostedUrl: string;
+    private hasToken: boolean;
+    public lastLoadError: string | null = null;
 
     constructor(
       primaryParams: any,
       fallbackParams?: any,
+      hostedUrl = "",
+      hasToken = false,
     ) {
       super(primaryParams);
+      this.hostedUrl = hostedUrl;
+      this.hasToken = hasToken;
       if (fallbackParams) {
         this.fallbackToolset = new MCPToolset(fallbackParams);
       }
@@ -981,25 +993,36 @@ export function createADKAgent(
         return this.cachedTools;
       }
 
-      // 1. Try Hosted Endpoint first
-      try {
-        console.log(`[Mapbox MCP] Connecting to hosted endpoint (${MAPBOX_MCP_CONFIG.hostedUrl})...`);
-        const tools = await super.getTools(context);
-        if (tools && tools.length > 0) {
-          const filtered = tools.filter((t: any) => !this.disallowed.has(t.name));
-          console.log(
-            `✅ [Mapbox MCP] Hosted endpoint connected successfully! Loaded ${filtered.length} tools:`,
-            filtered.map((t: any) => t.name).join(", "),
-          );
-          const sanitized = sanitizeMcpToolsForGemini(filtered);
-          this.cachedTools = sanitized;
-          return sanitized;
+      const hostedErrors: string[] = [];
+
+      // 1. Try Hosted Endpoint first (retry once for transient Lambda/TLS cold-start blips)
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          console.log(`[Mapbox MCP] Connecting to hosted endpoint (${this.hostedUrl}, attempt ${attempt}/2)...`);
+          const tools = await super.getTools(context);
+          if (tools && tools.length > 0) {
+            const filtered = tools.filter((t: any) => !this.disallowed.has(t.name));
+            console.log(
+              `✅ [Mapbox MCP] Hosted endpoint connected successfully! Loaded ${filtered.length} tools:`,
+              filtered.map((t: any) => t.name).join(", "),
+            );
+            const sanitized = sanitizeMcpToolsForGemini(filtered);
+            this.cachedTools = sanitized;
+            this.lastLoadError = null;
+            return sanitized;
+          }
+          hostedErrors.push(`attempt ${attempt}: hosted endpoint returned 0 tools`);
+        } catch (err: any) {
+          const msg = err?.message || String(err);
+          hostedErrors.push(`attempt ${attempt}: ${msg}`);
+          console.warn(`⚠️ [Mapbox MCP] Hosted endpoint connection failed (attempt ${attempt}/2):`, msg);
+          if (attempt === 1) {
+            await new Promise((resolve) => setTimeout(resolve, 350));
+          }
         }
-      } catch (err: any) {
-        console.warn("⚠️ [Mapbox MCP] Hosted endpoint connection failed:", err?.message || err);
       }
 
-      // 2. Seamless fallback to stdio (node scriptPath or npx @mapbox/mcp-server)
+      // 2. Seamless fallback to stdio (local dev or explicit MAPBOX_MCP_SCRIPT_PATH only)
       if (this.fallbackToolset) {
         try {
           console.log("[Mapbox MCP] Falling back to stdio process...");
@@ -1011,12 +1034,22 @@ export function createADKAgent(
           );
           const sanitized = sanitizeMcpToolsForGemini(filtered);
           this.cachedTools = sanitized;
+          this.lastLoadError = null;
           return sanitized;
         } catch (fbErr: any) {
-          console.error("❌ [Mapbox MCP] Both hosted endpoint and stdio fallback failed:", fbErr?.message || fbErr);
+          const fbMsg = fbErr?.message || String(fbErr);
+          console.error("❌ [Mapbox MCP] Both hosted endpoint and stdio fallback failed:", fbMsg);
+          this.lastLoadError =
+            `${!this.hasToken ? "MAPBOX_SECRET_TOKEN is missing in server runtime env. " : ""}` +
+            `Hosted (${hostedErrors.join(" | ")}); Stdio (${fbMsg})`;
+          return [];
         }
       }
 
+      this.lastLoadError =
+        `${!this.hasToken ? "MAPBOX_SECRET_TOKEN is missing in server runtime env. " : ""}` +
+        `Hosted (${hostedErrors.join(" | ")})`;
+      console.error("❌ [Mapbox MCP] Unable to load Mapbox tools:", this.lastLoadError);
       return [];
     }
   }
@@ -1024,6 +1057,11 @@ export function createADKAgent(
   const mapboxScriptPath =
     process.env.MAPBOX_MCP_SCRIPT_PATH ||
     MAPBOX_MCP_CONFIG.serverScriptPath;
+  const isServerlessRuntime = Boolean(
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.AWS_EXECUTION_ENV ||
+    process.env.VERCEL,
+  );
   const mapboxCommand = mapboxScriptPath ? "node" : "npx";
   const mapboxArgs = mapboxScriptPath
     ? [mapboxScriptPath]
@@ -1031,9 +1069,12 @@ export function createADKAgent(
   const mapboxToken =
     process.env.MAPBOX_SECRET_TOKEN ||
     process.env.MAPBOX_ACCESS_TOKEN ||
+    process.env.NEXT_PUBLIC_MAPBOX_SECRET_TOKEN ||
     MAPBOX_MCP_CONFIG.accessToken;
   const mapboxHostedUrl =
     process.env.MAPBOX_MCP_URL || MAPBOX_MCP_CONFIG.hostedUrl;
+
+  const canUseMapboxStdioFallback = Boolean(mapboxScriptPath) || !isServerlessRuntime;
 
   const mapboxMcpToolset = new DynamicMapboxMCPToolset(
     // Primary: Hosted Mapbox MCP endpoint (https://mcp.mapbox.com/mcp)
@@ -1050,20 +1091,24 @@ export function createADKAgent(
         },
       },
     },
-    // Fallback: Local / npx stdio process for reliability & offline safety
-    {
-      type: "StdioConnectionParams",
-      serverParams: {
-        command: mapboxCommand,
-        args: mapboxArgs,
-        env: {
-          ...process.env,
-          CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
-          MAPBOX_ACCESS_TOKEN: mapboxToken,
-          MAPBOX_SECRET_TOKEN: mapboxToken,
-        } as Record<string, string>,
-      },
-    },
+    // Fallback: Local / npx stdio process (skipped on read-only serverless runtimes when no script path is set)
+    canUseMapboxStdioFallback
+      ? {
+          type: "StdioConnectionParams",
+          serverParams: {
+            command: mapboxCommand,
+            args: mapboxArgs,
+            env: {
+              ...process.env,
+              CLIENT_NEEDS_RESOURCE_FALLBACK: "true",
+              MAPBOX_ACCESS_TOKEN: mapboxToken,
+              MAPBOX_SECRET_TOKEN: mapboxToken,
+            } as Record<string, string>,
+          },
+        }
+      : undefined,
+    mapboxHostedUrl,
+    Boolean(mapboxToken),
   );
 
   // 3. Set up the Playg MCP Toolsets (Hosted StreamableHTTP primary + Stdio fallback)
@@ -1700,6 +1745,7 @@ AGENT BOUNDARY (CRITICAL — VIOLATION CAUSES SYSTEM CRASH):
 - If you accidentally try to call a tool you don't own, the system will crash with an error. This is YOUR fault — avoid it.
 
 EXECUTION RULES:
+- ONLY call tools that are actually available in your declared tool declarations. If Mapbox MCP tools failed to load (not available), NEVER fabricate coordinates, routes, or fake completion from memory — immediately return an error message to planner_agent explaining that Mapbox MCP tools are unavailable.
 - Execute the requested tool(s) and return a clear technical summary with all geographic data found.
 - CRITICAL: If a tool returns a URI, URL, or data reference (e.g. Response_URL, mapbox://temp/...) for spatial data, DO NOT try to fetch, query, or read it yourself. Simply return the URL reference as it is to the parent.
 - DO NOT call render_map_tool. DO NOT attempt to render the map.
@@ -1858,7 +1904,8 @@ ERROR DETECTION (CRITICAL — CHECK THIS FIRST):
   • Messages containing "is not found in the toolsDict" (means wrong agent was used)
   • Messages containing "EXECUTION BLOCKED" (means permission was needed but not granted)
   • Any functionResponse with an error field, "isError": true, or error status
-- AUTH / BACKEND ERRORS (401 / Unauthorized / ECONNREFUSED): If the designated specialist (e.g., playground_agent) failed due to 401 Unauthorized or backend connection failure, DO NOT report INCOMPLETE to trigger retries or map_ui_agent zoom! Instead, respond directly and politely to the user explaining that the boundary/layer data could not be loaded because the Playground MCP service returned 401 Unauthorized / backend unavailable.
+- AUTH & TOOL-UNAVAILABLE FAILURES (401 / Unauthorized / ECONNREFUSED / toolsDict): If the designated specialist (e.g., mapbox_agent or playground_agent) failed due to missing tools ('not found in the toolsDict'), 401 Unauthorized, or backend connection failure, DO NOT report INCOMPLETE to trigger retries, DO NOT tell the user any coordinates from memory, and DO NOT claim any route/layer was displayed! Instead, respond directly and politely to the user explaining that the requested location/route/boundary could not be fetched because the required tool/service was unavailable.
+- NEVER answer geographic queries from general knowledge when a tool failed. Every coordinate or route you state MUST come from a successful tool response in the conversation history.
 - For tool-routing / missing-step errors, mark the task as INCOMPLETE and specify:
   • Which tool/action failed
   • What the error was
@@ -1954,7 +2001,7 @@ Repeat until verifying_agent confirms everything is done.
 
 STEP 4 — ERROR RECOVERY & LOOP PREVENTION (CRITICAL):
 If a work agent returns an error like "Function X is not found in the toolsDict", "UNKNOWN_ERROR", "401", "Unauthorized", or "isError: true":
-- LOOP PREVENTION & AUTH/BACKEND FAILURES: If the failing agent was ALREADY the designated specialist (e.g., mapbox_agent failed on a mapbox search tool, or playground_agent failed on get_district_data/get_zip_data/get_user_layers with 401 Unauthorized or connection error), DO NOT transfer back to that same agent AND DO NOT route to map_ui_agent to zoom/fly as a workaround! Stop immediately and explain clearly to the user why the data could not be loaded (e.g., Playg MCP returned 401 Unauthorized / token mismatch or backend unavailable). NEVER retry the same failing tool in a loop.
+- LOOP PREVENTION & AUTH/BACKEND/MCP FAILURES: If the failing agent was ALREADY the designated specialist (e.g., mapbox_agent failed on search_and_geocode_tool / directions_tool, or playground_agent failed on get_district_data/get_zip_data/get_user_layers), DO NOT transfer back to that same agent, DO NOT route to map_ui_agent to zoom/fly as a workaround, and DO NOT route to verifying_agent to answer from AI memory! Stop immediately and explain clearly to the user why the service/tool could not execute (e.g., Mapbox MCP tools unavailable in toolsDict or Playg MCP 401 Unauthorized). NEVER retry the same failing tool in a loop and NEVER provide unverified coordinates.
 - If the task was sent to the WRONG agent, route to the CORRECT agent once:
   * Failed tool is score_pincode_locus or compare_pincodes_locus_score → Route to map_ui_agent
   * Failed tool starts with map_* (map_rotate, map_zoom, map_fly_to, etc.) → Route to map_ui_agent
