@@ -38,6 +38,29 @@ export const MAPBOX_MCP_CONFIG = {
     "",
 } as const;
 
+// ─── Playg MCP Config (Hosted Endpoint & Stdio Fallback) ───────
+export const PLAYG_MCP_CONFIG = {
+  /**
+   * Hosted Playg MCP endpoint URL (e.g. "https://playg-mcp-server.vercel.app/").
+   */
+  hostedUrl:
+    process.env.PLAYG_MCP_URL ?? "https://playg-mcp-server.vercel.app/",
+
+  /**
+   * Local Playg MCP server built entrypoint path (e.g. build/index.js).
+   * Used as fallback or for local offline development.
+   */
+  serverScriptPath: process.env.PLAYG_MCP_SCRIPT_PATH ?? "",
+
+  apiBase: process.env.PLAYG_API_BASE ?? "http://localhost:8000",
+  redisUrl:
+    process.env.PLAYG_REDIS_URL ||
+    process.env.REDIS_URL ||
+    "redis://localhost:6379",
+  bearerToken:
+    process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || "",
+} as const;
+
 // ─── Backend MCP Config (future) ──────────────────────────────
 export const BACKEND_MCP_CONFIG = {
   /**
