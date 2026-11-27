@@ -24,12 +24,16 @@ async function getPlaygMcpClient(): Promise<Client> {
   const hostedUrl = process.env.PLAYG_MCP_URL ?? PLAYG_MCP_CONFIG.hostedUrl;
   const scriptPath =
     process.env.PLAYG_MCP_SCRIPT_PATH || PLAYG_MCP_CONFIG.serverScriptPath;
-  const bearerToken =
+  const rawBearerToken = (
     process.env.PLAYG_BEARER_TOKEN ||
     process.env.BEARER_TOKEN ||
-    PLAYG_MCP_CONFIG.bearerToken;
+    PLAYG_MCP_CONFIG.bearerToken
+  )
+    .replace(/^Bearer\s+/i, "")
+    .trim();
 
   // 1. Try Hosted Endpoint first (https://playg-mcp-server.vercel.app/)
+  // Note: Send raw JWT (without "Bearer ") because playg-mcp-server prepends "Bearer " itself.
   if (hostedUrl) {
     try {
       console.log(`[Playg MCP] Attempting connection to hosted endpoint: ${hostedUrl}`);
@@ -40,7 +44,7 @@ async function getPlaygMcpClient(): Promise<Client> {
             headers: {
               Accept: "application/json, text/event-stream",
               "Content-Type": "application/json",
-              ...(bearerToken ? { Authorization: `Bearer ${bearerToken}` } : {}),
+              ...(rawBearerToken ? { Authorization: rawBearerToken } : {}),
             },
           },
         }
@@ -84,7 +88,7 @@ async function getPlaygMcpClient(): Promise<Client> {
         process.env.PLAYG_REDIS_URL ||
         process.env.REDIS_URL ||
         PLAYG_MCP_CONFIG.redisUrl,
-      BEARER_TOKEN: bearerToken,
+      BEARER_TOKEN: rawBearerToken,
       INSTANCE_PATH: process.env.DUCKDB_INSTANCE_PATH || ":memory:",
       FILE_PATH: "",
     },

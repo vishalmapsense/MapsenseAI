@@ -1203,9 +1203,18 @@ export function createADKAgent(
     process.env.PLAYG_API_BASE || PLAYG_MCP_CONFIG.apiBase;
   const defaultPlaygRedisUrl =
     process.env.PLAYG_REDIS_URL || process.env.REDIS_URL || PLAYG_MCP_CONFIG.redisUrl;
-  const defaultPlaygBearerToken =
-    process.env.PLAYG_BEARER_TOKEN || process.env.BEARER_TOKEN || PLAYG_MCP_CONFIG.bearerToken;
+  const defaultPlaygBearerToken = (
+    process.env.PLAYG_BEARER_TOKEN ||
+    process.env.BEARER_TOKEN ||
+    PLAYG_MCP_CONFIG.bearerToken
+  )
+    .replace(/^Bearer\s+/i, "")
+    .trim();
 
+  // playg-mcp-server (origin/main) reads ctx.http.req.headers.get("authorization")
+  // verbatim without stripping "Bearer " and prepends "Bearer " in makePlaygReq().
+  // Sending the raw JWT prevents a "Bearer Bearer <token>" 401 and stays compatible
+  // if the server is updated to strip "Bearer " later.
   const playgHttpParams = playgHostedUrl
     ? {
         type: "StreamableHTTPConnectionParams" as const,
@@ -1216,7 +1225,7 @@ export function createADKAgent(
               Accept: "application/json, text/event-stream",
               "Content-Type": "application/json",
               ...(defaultPlaygBearerToken
-                ? { Authorization: `Bearer ${defaultPlaygBearerToken}` }
+                ? { Authorization: defaultPlaygBearerToken }
                 : {}),
             },
           },
@@ -1310,7 +1319,11 @@ export function createADKAgent(
       if (!normalized && rawParsed?._needsFetch && rawParsed?._responseUrl) {
         console.log(`  ↳ Fetching Response_URL: ${rawParsed._responseUrl}`);
         try {
-          const fetchRes = await fetch(rawParsed._responseUrl);
+          const fetchRes = await fetch(rawParsed._responseUrl, {
+            headers: defaultPlaygBearerToken
+              ? { Authorization: `Bearer ${defaultPlaygBearerToken}` }
+              : undefined,
+          });
           if (!fetchRes.ok) {
             throw new Error(`HTTP ${fetchRes.status} fetching Playg JSON`);
           }
@@ -1326,9 +1339,14 @@ export function createADKAgent(
           if (jsonData) {
             rawParsed = jsonData;
           }
-        } catch (e) {
-          console.error(`  ↳ Failed to fetch Response_URL:`, e);
-          return undefined;
+        } catch (e: any) {
+          const causeCode = e?.cause?.code ? ` (${e.cause.code}: ${e.cause.message || ""})` : "";
+          const errDetail = `${e?.message || e}${causeCode}`;
+          console.error(`  ↳ Failed to fetch Response_URL:`, errDetail);
+          return {
+            isError: true,
+            error: `Failed to fetch spatial payload from ${rawParsed._responseUrl}: ${errDetail}`,
+          };
         }
       }
 
